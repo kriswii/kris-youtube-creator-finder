@@ -157,6 +157,10 @@ function formatCountrySource(value: string | null | undefined): string {
   }
 }
 
+function normalizeCountryCode(value: string | null | undefined): string {
+  return (value ?? "").trim().toUpperCase();
+}
+
 function compareValues(
   left: string | number | null | undefined,
   right: string | number | null | undefined,
@@ -247,9 +251,11 @@ export default function App() {
 
   const filteredResults = useMemo(() => {
     const results = jobData?.results ?? [];
+    const selectedCountry = normalizeCountryCode(jobData?.job.channel_country);
     return sortResults(
       results.filter((result) => {
         return (
+          (!selectedCountry || normalizeCountryCode(result.channel_country) === selectedCountry) &&
           result.subscribers >= filterSubscriberMin &&
           result.subscribers <= filterSubscriberMax &&
           (result.pre_score ?? 0) >= filterPreScoreMin &&
@@ -266,6 +272,12 @@ export default function App() {
     () => (jobData?.results ?? []).filter((result) => result.status === "shortlisted").length,
     [jobData]
   );
+
+  const matchedCountryCount = useMemo(() => {
+    const selectedCountry = normalizeCountryCode(jobData?.job.channel_country);
+    if (!selectedCountry) return null;
+    return (jobData?.results ?? []).filter((result) => normalizeCountryCode(result.channel_country) === selectedCountry).length;
+  }, [jobData]);
 
   const averagePreScore = useMemo(() => {
     const values = (jobData?.results ?? []).map((result) => result.pre_score).filter((value): value is number => value !== null && value !== undefined);
@@ -319,11 +331,18 @@ export default function App() {
       await runStage(job.id, "run-search");
       await runStage(job.id, "run-enrichment");
       await runStage(job.id, "run-pre-score");
+      if (normalizedCountry) {
+        await runStage(job.id, "run-shortlist");
+      }
       await refreshJob(job.id);
       await refreshQuotaSummary();
       setMode("workspace");
       setShowSearchOverlay(false);
-      setMessage(`已完成“${keyword}”的候选搜索、指标补全和预评分。`);
+      setMessage(
+        normalizedCountry
+          ? `已完成“${keyword}”的候选搜索、指标补全、预评分和 ${normalizedCountry} 国家过滤。`
+          : `已完成“${keyword}”的候选搜索、指标补全和预评分。`
+      );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "搜索失败，请稍后重试。");
     } finally {
@@ -367,7 +386,9 @@ export default function App() {
   }
 
   const currentStage = jobData ? stageLabelMap[jobData.job.stage] ?? jobData.job.stage : "未开始";
-  const currentKeyword = jobData?.job.keyword ?? "未运行任务";
+  const currentKeyword = jobData
+    ? `${jobData.job.keyword}${jobData.job.channel_country ? ` · ${jobData.job.channel_country}` : ""}`
+    : "未运行任务";
 
   if (mode === "home") {
     return (
@@ -564,6 +585,10 @@ export default function App() {
             <div className="stat-panel">
               <div className="stat-label">结果总数</div>
               <div className="stat-value">{jobData?.results.length ?? 0}</div>
+            </div>
+            <div className="stat-panel">
+              <div className="stat-label">国家命中</div>
+              <div className="stat-value">{matchedCountryCount ?? "-"}</div>
             </div>
             <div className="stat-panel">
               <div className="stat-label">已入围</div>
