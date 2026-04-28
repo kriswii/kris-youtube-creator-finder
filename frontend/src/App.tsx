@@ -144,6 +144,19 @@ function formatPercent(value: number | null | undefined): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function formatCountrySource(value: string | null | undefined): string {
+  switch (value) {
+    case "youtube_about_popup":
+      return "主页更多";
+    case "youtube_api":
+      return "API";
+    case "metadata_keyword":
+      return "文案判断";
+    default:
+      return "未标注";
+  }
+}
+
 function compareValues(
   left: string | number | null | undefined,
   right: string | number | null | undefined,
@@ -619,6 +632,7 @@ export default function App() {
                       <th><button className="sort-button" onClick={() => handleSort("title")}>标题{sortIndicator("title")}</button></th>
                       <th><button className="sort-button" onClick={() => handleSort("channel_title")}>频道{sortIndicator("channel_title")}</button></th>
                       <th><span className="table-label">国家</span></th>
+                      <th><span className="table-label">语言</span></th>
                       <th className="numeric"><button className="sort-button" onClick={() => handleSort("subscribers")}>粉丝{sortIndicator("subscribers")}</button></th>
                       <th className="numeric"><button className="sort-button" onClick={() => handleSort("views")}>播放量{sortIndicator("views")}</button></th>
                       <th className="numeric"><button className="sort-button" onClick={() => handleSort("engagement_rate")}>互动率<MetricHelp metric="engagement_rate" />{sortIndicator("engagement_rate")}</button></th>
@@ -645,6 +659,7 @@ export default function App() {
                         </td>
                         <td>{result.channel_title ?? "-"}</td>
                         <td>{result.channel_country || "无"}</td>
+                        <td>{result.video_language || "无"}</td>
                         <td className="numeric">{formatCompactNumber(result.subscribers)}</td>
                         <td className="numeric">{formatCompactNumber(result.views)}</td>
                         <td className={`numeric ${((result.engagement_rate ?? 0) > 0.05 ? "metric-positive" : "")}`}>{formatPercent(result.engagement_rate)}</td>
@@ -705,6 +720,8 @@ export default function App() {
                         <div className="detail-list__item"><span>Pre Score<MetricHelp metric="pre_score" placement="top" /></span><strong>{selectedResult.pre_score?.toFixed(2) ?? "-"}</strong></div>
                         <div className="detail-list__item"><span>机会层级<MetricHelp metric="opportunity_tier" /></span><strong>{selectedResult.opportunity_tier ?? "-"}</strong></div>
                         <div className="detail-list__item"><span>国家</span><strong>{selectedResult.channel_country || "无"}</strong></div>
+                        <div className="detail-list__item"><span>国家来源</span><strong>{formatCountrySource(selectedResult.channel_country_source)}</strong></div>
+                        <div className="detail-list__item"><span>视频语言</span><strong>{selectedResult.video_language || "无"}</strong></div>
                         <div className="detail-list__item"><span>状态</span><strong>{statusLabelMap[selectedResult.status] ?? selectedResult.status}</strong></div>
                       </div>
                     </section>

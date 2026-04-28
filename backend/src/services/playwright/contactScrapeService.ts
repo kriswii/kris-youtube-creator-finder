@@ -8,6 +8,22 @@ function unique(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
+const COUNTRY_ALIASES: Array<{ code: string; aliases: string[] }> = [
+  { code: "PH", aliases: ["philippines", "philippine", "filipino", "pinoy", "tagalog", "菲律宾", "菲律賓"] },
+  { code: "US", aliases: ["united states", "usa", "u.s.", "america", "美国", "美國"] },
+  { code: "JP", aliases: ["japan", "japanese", "日本"] },
+  { code: "KR", aliases: ["korea", "south korea", "korean", "韩国", "韓國"] },
+  { code: "TW", aliases: ["taiwan", "taiwanese", "台湾", "台灣"] },
+  { code: "TH", aliases: ["thailand", "thai", "泰国", "泰國"] },
+  { code: "ID", aliases: ["indonesia", "indonesian", "印尼", "印度尼西亚", "印度尼西亞"] },
+  { code: "MY", aliases: ["malaysia", "malaysian", "马来西亚", "馬來西亞"] },
+  { code: "VN", aliases: ["vietnam", "vietnamese", "越南"] },
+  { code: "SG", aliases: ["singapore", "singaporean", "新加坡"] },
+  { code: "BR", aliases: ["brazil", "brazilian", "巴西"] },
+  { code: "ES", aliases: ["spain", "spanish", "西班牙"] },
+  { code: "UA", aliases: ["ukraine", "ukrainian", "乌克兰", "烏克蘭"] }
+];
+
 function normalizeUrl(input: string): string {
   try {
     return new URL(input, "https://www.youtube.com").toString();
@@ -30,6 +46,37 @@ function buildAboutUrl(channelUrl: string): string {
 
 function extractEmails(text: string): string[] {
   return unique(text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []);
+}
+
+function extractCountryFromText(text: string): { code: string; source: string } | null {
+  const normalized = text
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return null;
+
+  const lines = normalized
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const { code, aliases } of COUNTRY_ALIASES) {
+    for (const alias of aliases) {
+      if (lines.some((line) => line === alias || line.endsWith(` ${alias}`) || line.includes(` ${alias} `))) {
+        return { code, source: "youtube_about_popup" };
+      }
+    }
+  }
+
+  for (const { code, aliases } of COUNTRY_ALIASES) {
+    for (const alias of aliases) {
+      if (normalized.includes(alias)) {
+        return { code, source: "youtube_about_popup" };
+      }
+    }
+  }
+
+  return null;
 }
 
 function platformFromUrl(url: string): string {
@@ -397,6 +444,8 @@ export async function scrapePublicChannelContact(input: ContactScrapeInput): Pro
     await maybeOpenDetailsDialog(page);
 
     const bodyText = await page.locator("body").innerText().catch(() => "");
+    const popupText = await page.locator("ytd-popup-container").innerText({ timeout: 2000 }).catch(() => "");
+    const countryMatch = extractCountryFromText([popupText, bodyText].filter(Boolean).join("\n"));
     const emailResult = await maybeRevealEmail(page);
     const popupLinks = await getScopedLinks(page, "ytd-popup-container");
     const pageLinks = await collectLinks(page);
@@ -438,6 +487,8 @@ export async function scrapePublicChannelContact(input: ContactScrapeInput): Pro
       social_links,
       social_links_json: JSON.stringify(social_links),
       website_url,
+      about_page_country: countryMatch?.code ?? null,
+      about_page_country_source: countryMatch?.source ?? null,
       contact_status,
       contactability_score,
       browser_mode: session.mode,

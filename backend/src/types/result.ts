@@ -36,6 +36,8 @@ export interface CreatorResult {
   channel_description: string | null;
   channel_avatar_url: string | null;
   channel_country: string | null;
+  channel_country_source: string | null;
+  video_language: string | null;
   days_since_publish: number | null;
   engagement_rate: number | null;
   comment_rate: number | null;

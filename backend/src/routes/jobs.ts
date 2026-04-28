@@ -21,6 +21,7 @@ import {
 import { getQuotaSummary, recordQuotaUsage } from "../services/youtube/quotaService.js";
 import { computePreScore } from "../services/scoring/scoringService.js";
 import { createExportFile } from "../services/export/exportService.js";
+import { scrapePublicChannelContact } from "../services/playwright/contactScrapeService.js";
 
 export interface RouteResult {
   handled: boolean;
@@ -171,6 +172,7 @@ function applyVideoMetric(db: SqliteDatabase, jobId: string, metric: YouTubeVide
       comments = ?,
       channel_id = COALESCE(NULLIF(?, ''), channel_id),
       channel_title = COALESCE(NULLIF(?, ''), channel_title),
+      video_language = COALESCE(NULLIF(?, ''), video_language),
       status = 'enriched',
       updated_at = ?
     WHERE job_id = ? AND video_id = ?`
@@ -182,6 +184,7 @@ function applyVideoMetric(db: SqliteDatabase, jobId: string, metric: YouTubeVide
     metric.comments,
     metric.channel_id,
     metric.channel_title,
+    metric.video_language,
     nowIso(),
     jobId,
     metric.video_id
@@ -196,6 +199,10 @@ function applyChannelMetric(db: SqliteDatabase, jobId: string, metric: YouTubeCh
       channel_description = COALESCE(NULLIF(?, ''), channel_description),
       channel_avatar_url = COALESCE(NULLIF(?, ''), channel_avatar_url),
       channel_country = COALESCE(NULLIF(?, ''), channel_country),
+      channel_country_source = CASE
+        WHEN COALESCE(NULLIF(?, ''), '') <> '' THEN 'youtube_api'
+        ELSE channel_country_source
+      END,
       updated_at = ?
     WHERE job_id = ? AND channel_id = ?`
   ).run(
@@ -204,10 +211,93 @@ function applyChannelMetric(db: SqliteDatabase, jobId: string, metric: YouTubeCh
     metric.channel_description,
     metric.channel_avatar_url,
     metric.channel_country,
+    metric.channel_country,
     nowIso(),
     jobId,
     metric.channel_id
   );
+}
+
+const PHILIPPINES_EVIDENCE_PATTERN = /\b(pinoy|filipino|philippines|philippine|tagalog)\b|菲律宾|菲律賓/i;
+
+const COUNTRY_SOURCE_PRIORITY: Record<string, number> = {
+  youtube_about_popup: 4,
+  youtube_api: 3,
+  metadata_keyword: 2,
+  unknown: 1
+};
+
+function hasPhilippinesMetadataEvidence(row: CreatorResult): boolean {
+  return PHILIPPINES_EVIDENCE_PATTERN.test([row.channel_title, row.channel_description, row.title].filter(Boolean).join(" "));
+}
+
+function countrySourcePriority(source: string | null | undefined): number {
+  return COUNTRY_SOURCE_PRIORITY[source ?? ""] ?? 0;
+}
+
+function updateCountryEvidence(
+  db: SqliteDatabase,
+  rowId: string,
+  countryCode: string,
+  source: string
+): void {
+  db.prepare(
+    `UPDATE results
+     SET channel_country = ?,
+         channel_country_source = ?,
+         updated_at = ?
+     WHERE id = ?`
+  ).run(countryCode, source, nowIso(), rowId);
+}
+
+async function strengthenCountrySignals(
+  db: SqliteDatabase,
+  job: JobRecord,
+  rows: CreatorResult[]
+): Promise<CreatorResult[]> {
+  if (!job.channel_country) return rows;
+
+  const targetCountry = job.channel_country.trim().toUpperCase();
+  const resolvedRows = rows.map((row) => ({ ...row }));
+  const scrapeLimit = Math.min(Math.max(job.shortlist_size * 2, 12), resolvedRows.length);
+
+  for (let index = 0; index < scrapeLimit; index += 1) {
+    const row = resolvedRows[index];
+    if (!row.channel_id || !row.channel_title) continue;
+
+    if (row.channel_country?.toUpperCase() === targetCountry && row.channel_country_source === "youtube_about_popup") {
+      continue;
+    }
+
+    try {
+      const channelIdentifier = row.channel_id.startsWith("UC") ? `/channel/${row.channel_id}` : `/@${row.channel_id}`;
+      const scrape = await scrapePublicChannelContact({
+        channelUrl: `https://www.youtube.com${channelIdentifier}`,
+        requireLoggedInBrowser: false,
+        manualAssist: false
+      });
+
+      if (scrape.about_page_country) {
+        row.channel_country = scrape.about_page_country;
+        row.channel_country_source = scrape.about_page_country_source ?? "youtube_about_popup";
+        updateCountryEvidence(db, row.id, row.channel_country, row.channel_country_source);
+        continue;
+      }
+    } catch {
+      // Best-effort country enrichment; fallback to existing metadata below.
+    }
+
+    if (targetCountry === "PH" && hasPhilippinesMetadataEvidence(row)) {
+      row.channel_country = "PH";
+      row.channel_country_source = row.channel_country_source ?? "metadata_keyword";
+      updateCountryEvidence(db, row.id, "PH", row.channel_country_source);
+    } else if (row.channel_country?.toUpperCase() === targetCountry && !row.channel_country_source) {
+      row.channel_country_source = "youtube_api";
+      updateCountryEvidence(db, row.id, row.channel_country, "youtube_api");
+    }
+  }
+
+  return resolvedRows;
 }
 
 function buildSearchKeywords(job: JobRecord): string[] {
@@ -402,69 +492,47 @@ function runPreScore(db: SqliteDatabase, job: JobRecord): { scored_count: number
   return { scored_count: scoredCount, skipped_count: skippedCount };
 }
 
-function runShortlist(db: SqliteDatabase, job: JobRecord): { shortlisted_count: number; rejected_count: number } {
+async function runShortlist(db: SqliteDatabase, job: JobRecord): Promise<{ shortlisted_count: number; rejected_count: number }> {
   const hasCountryFilter = Boolean(job.channel_country);
-  const countryCode = job.channel_country ?? "";
-  const isPhilippinesEvidenceFilter = countryCode === "PH";
-  const query = hasCountryFilter
-    ? `SELECT * FROM results
-       WHERE job_id = ?
-         AND pre_score IS NOT NULL
-         AND subscribers BETWEEN ? AND ?
-         AND days_since_publish <= ?
-         AND views >= 3000
-         AND pre_score >= ?
-         AND ${
-           isPhilippinesEvidenceFilter
-             ? `(UPPER(COALESCE(channel_country, '')) = ?
-                 OR LOWER(COALESCE(channel_title, '')) LIKE '%pinoy%'
-                 OR LOWER(COALESCE(channel_title, '')) LIKE '%filipino%'
-                 OR LOWER(COALESCE(channel_title, '')) LIKE '%philippines%'
-                 OR LOWER(COALESCE(channel_title, '')) LIKE '%philippine%'
-                 OR LOWER(COALESCE(channel_title, '')) LIKE '%tagalog%'
-                 OR LOWER(COALESCE(channel_description, '')) LIKE '%pinoy%'
-                 OR LOWER(COALESCE(channel_description, '')) LIKE '%filipino%'
-                 OR LOWER(COALESCE(channel_description, '')) LIKE '%philippines%'
-                 OR LOWER(COALESCE(channel_description, '')) LIKE '%philippine%'
-                 OR LOWER(COALESCE(channel_description, '')) LIKE '%tagalog%')`
-             : `UPPER(COALESCE(channel_country, '')) = ?`
-         }
-       ORDER BY pre_score DESC, raw_search_rank ASC
-       LIMIT ?`
-    : `SELECT * FROM results
-       WHERE job_id = ?
-         AND pre_score IS NOT NULL
-         AND subscribers BETWEEN ? AND ?
-         AND days_since_publish <= ?
-         AND views >= 3000
-         AND pre_score >= ?
-       ORDER BY pre_score DESC, raw_search_rank ASC
-       LIMIT ?`;
+  const countryCode = job.channel_country?.trim().toUpperCase() ?? "";
+  const candidatePoolSize = Math.max(job.shortlist_size * 4, 20);
+  const query = `SELECT * FROM results
+      WHERE job_id = ?
+        AND pre_score IS NOT NULL
+        AND subscribers BETWEEN ? AND ?
+        AND days_since_publish <= ?
+        AND views >= 3000
+        AND pre_score >= ?
+      ORDER BY pre_score DESC, raw_search_rank ASC
+      LIMIT ?`;
 
-  const rows = hasCountryFilter
-    ? (db
-        .prepare(query)
-        .all(
-          job.id,
-          job.subscriber_min,
-          job.subscriber_max,
-          job.lookback_days,
-          job.minimum_pre_score,
-          countryCode,
-          job.shortlist_size
-        ) as unknown as CreatorResult[])
-    : (db
-        .prepare(query)
-        .all(
-          job.id,
-          job.subscriber_min,
-          job.subscriber_max,
-          job.lookback_days,
-          job.minimum_pre_score,
-          job.shortlist_size
-        ) as unknown as CreatorResult[]);
+  const candidateRows = db
+    .prepare(query)
+    .all(
+      job.id,
+      job.subscriber_min,
+      job.subscriber_max,
+      job.lookback_days,
+      job.minimum_pre_score,
+      candidatePoolSize
+    ) as unknown as CreatorResult[];
 
-  const shortlistIds = new Set(rows.map((row) => row.id));
+  const strengthenedRows = hasCountryFilter ? await strengthenCountrySignals(db, job, candidateRows) : candidateRows;
+  const shortlistedRows = strengthenedRows
+    .filter((row) => {
+      if (!hasCountryFilter) return true;
+      return row.channel_country?.trim().toUpperCase() === countryCode;
+    })
+    .sort((left, right) => {
+      const sourceDiff = countrySourcePriority(right.channel_country_source) - countrySourcePriority(left.channel_country_source);
+      if (sourceDiff !== 0) return sourceDiff;
+      const scoreDiff = (right.pre_score ?? 0) - (left.pre_score ?? 0);
+      if (scoreDiff !== 0) return scoreDiff;
+      return (left.raw_search_rank ?? Number.MAX_SAFE_INTEGER) - (right.raw_search_rank ?? Number.MAX_SAFE_INTEGER);
+    })
+    .slice(0, job.shortlist_size);
+
+  const shortlistIds = new Set(shortlistedRows.map((row) => row.id));
   const preScoredRows = db.prepare("SELECT id FROM results WHERE job_id = ? AND pre_score IS NOT NULL").all(job.id) as {
     id: string;
   }[];
@@ -479,7 +547,7 @@ function runShortlist(db: SqliteDatabase, job: JobRecord): { shortlisted_count: 
     updateJobStage(db, job.id, "shortlist");
   });
 
-  return { shortlisted_count: rows.length, rejected_count: rejectedCount };
+  return { shortlisted_count: shortlistedRows.length, rejected_count: rejectedCount };
 }
 
 function runExport(db: SqliteDatabase, job: JobRecord, format: "csv" | "xlsx"): ExportRecord {
@@ -548,7 +616,7 @@ async function runAll(db: SqliteDatabase, job: JobRecord): Promise<Record<string
   const search = await runSearch(db, job);
   const enrichment = await runEnrichment(db, job);
   const preScore = runPreScore(db, job);
-  const shortlist = runShortlist(db, job);
+  const shortlist = await runShortlist(db, job);
   return { search, enrichment, pre_score: preScore, shortlist };
 }
 
@@ -620,7 +688,7 @@ export async function handleJobsRoute(
     }
 
     if (action === "run-shortlist") {
-      const result = runShortlist(db, job);
+      const result = await runShortlist(db, job);
       sendJson(res, 200, { ok: true, job_id: jobId, action, ...result });
       return { handled: true };
     }

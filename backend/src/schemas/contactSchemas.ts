@@ -7,6 +7,8 @@ export const contactInfoSchema = z.object({
   public_email: z.string().email().nullable(),
   social_links: z.array(z.string().url()),
   website_url: z.string().url().nullable(),
+  about_page_country: z.string().nullable(),
+  about_page_country_source: z.string().nullable(),
   contact_status: contactStatusSchema,
   contactability_score: z.number().min(0).max(100).nullable()
 });

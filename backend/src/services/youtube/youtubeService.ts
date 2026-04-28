@@ -38,6 +38,7 @@ export interface YouTubeVideoMetric {
   comments: number;
   channel_id: string;
   channel_title: string;
+  video_language: string;
 }
 
 export interface YouTubeChannelMetric {
@@ -151,6 +152,8 @@ export async function searchCandidates(input: SearchCandidatesInput): Promise<Se
           publishedAt?: string;
           channelId?: string;
           channelTitle?: string;
+          defaultAudioLanguage?: string;
+          defaultLanguage?: string;
         };
       }>;
     }>(
@@ -213,6 +216,8 @@ export async function enrichVideoMetrics(
           publishedAt?: string;
           channelId?: string;
           channelTitle?: string;
+          defaultAudioLanguage?: string;
+          defaultLanguage?: string;
         };
         statistics?: {
           viewCount?: string;
@@ -245,7 +250,8 @@ export async function enrichVideoMetrics(
         likes: toInt(stats.likeCount),
         comments: toInt(stats.commentCount),
         channel_id: snippet.channelId || "",
-        channel_title: snippet.channelTitle || ""
+        channel_title: snippet.channelTitle || "",
+        video_language: snippet.defaultAudioLanguage || snippet.defaultLanguage || ""
       });
     }
   }

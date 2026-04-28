@@ -5,6 +5,8 @@ export interface ContactInfo {
   public_email: string | null;
   social_links: string[];
   website_url: string | null;
+  about_page_country: string | null;
+  about_page_country_source: string | null;
   contact_status: ContactStatus;
   contactability_score: number | null;
 }

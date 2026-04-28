@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS results (
   channel_description TEXT,
   channel_avatar_url TEXT,
   channel_country TEXT,
+  channel_country_source TEXT,
+  video_language TEXT,
   days_since_publish INTEGER,
   engagement_rate REAL,
   comment_rate REAL,
