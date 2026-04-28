@@ -1,0 +1,14 @@
+{
+  "name": "youtube-finder-api-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "set-backend": "wrangler secret put BACKEND_BASE_URL"
+  },
+  "devDependencies": {
+    "wrangler": "^4.53.0"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "youtube-creator-pipeline-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:init": "tsx src/db/migrations.ts",
+    "roblox:today": "tsx src/cli/robloxToday.ts"
+  },
+  "dependencies": {
+    "playwright-core": "^1.54.2",
+    "xlsx": "^0.18.5",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.7"
+  }
+}

@@ -1,0 +1,47 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+**/dist/
+*.tsbuildinfo
+
+# Local data and exports
+backend/data/*.sqlite
+backend/data/*.sqlite-*
+backend/data/exports/*
+!backend/data/.gitkeep
+!backend/data/exports/.gitkeep
+
+# Cloudflare / local tool state
+.wrangler/
+.tmp/
+.tmp-*/
+.skill-staging/
+
+# Browser profiles and experiments
+.tmp-comet-profile/
+.tmp-comet-profile-channel/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Generated local HTML/cache artifacts
+www.futunn.com_*.html
+.tmp-skillhub.html
