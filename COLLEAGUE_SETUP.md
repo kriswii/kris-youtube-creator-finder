@@ -18,7 +18,7 @@ This package is the current customized version of the YouTube Finder used for Ph
 - Current default behavior:
   - lookback window fixed to 14 days
   - shortlist display target fixed to about 50 channels
-  - max subscribers fixed to 500000
+  - max subscribers fixed to 5000000
   - max candidates is editable in the UI
 
 ## Requirements
@@ -36,7 +36,7 @@ Copy `.env.example` to `.env` in the repo root and set:
 YOUTUBE_API_KEY=your_key_here
 APP_BASE_URL=http://localhost:3000
 DEFAULT_SUB_MIN=100
-DEFAULT_SUB_MAX=500000
+DEFAULT_SUB_MAX=5000000
 DEFAULT_MAX_CANDIDATES=500
 DEFAULT_LOOKBACK_DAYS=14
 EXPORT_DIR=./data/exports

@@ -26,7 +26,7 @@ import { searchCandidatesViaYouTubeWeb } from "../services/playwright/youtubeWeb
 
 const FIXED_SHORTLIST_SIZE = 50;
 const FIXED_LOOKBACK_DAYS = 14;
-const FIXED_SUBSCRIBER_MAX = 500000;
+const FIXED_SUBSCRIBER_MAX = 5000000;
 
 export interface RouteResult {
   handled: boolean;

@@ -6,7 +6,7 @@ const defaultForm: CreateJobInput = {
   keyword: "",
   lookback_days: 14,
   subscriber_min: 100,
-  subscriber_max: 500000,
+  subscriber_max: 5000000,
   max_candidates: 500,
   shortlist_size: 50,
   minimum_pre_score: 0,
@@ -563,7 +563,7 @@ export default function App() {
                   </label>
                     <label>
                       <span>最大粉丝数</span>
-                      <input type="number" value={500000} readOnly />
+                      <input type="number" value={5000000} readOnly />
                     </label>
                   </div>
               </div>
