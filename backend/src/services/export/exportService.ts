@@ -5,38 +5,38 @@ import { env } from "../../config/env.js";
 import type { CreatorResult } from "../../types/result.js";
 import type { ExportFormat } from "../../types/export.js";
 
+export interface ExportRow {
+  keyword: string;
+  representative_title: string;
+  channel_title: string;
+  channel_url: string;
+  channel_id: string;
+  channel_country: string;
+  channel_country_source: string;
+  video_language: string;
+  published_at: string;
+  views: number | string;
+  subscribers: number | string;
+  status: string;
+}
+
 export interface ExportColumn {
-  key: keyof CreatorResult;
+  key: keyof ExportRow;
   label: string;
 }
 
 export const exportColumns: ExportColumn[] = [
   { key: "keyword", label: "keyword" },
-  { key: "video_id", label: "video_id" },
-  { key: "video_url", label: "video_url" },
-  { key: "title", label: "title" },
+  { key: "representative_title", label: "representative_title" },
   { key: "channel_title", label: "channel_title" },
+  { key: "channel_url", label: "channel_url" },
   { key: "channel_id", label: "channel_id" },
   { key: "channel_country", label: "channel_country" },
   { key: "channel_country_source", label: "channel_country_source" },
   { key: "video_language", label: "video_language" },
   { key: "published_at", label: "published_at" },
-  { key: "days_since_publish", label: "days_since_publish" },
   { key: "views", label: "views" },
-  { key: "likes", label: "likes" },
-  { key: "comments", label: "comments" },
   { key: "subscribers", label: "subscribers" },
-  { key: "engagement_rate", label: "engagement_rate" },
-  { key: "comment_rate", label: "comment_rate" },
-  { key: "view_sub_ratio", label: "view_sub_ratio" },
-  { key: "relative_velocity", label: "relative_velocity" },
-  { key: "sub_fit_score", label: "sub_fit_score" },
-  { key: "view_sub_score", label: "view_sub_score" },
-  { key: "engagement_score", label: "engagement_score" },
-  { key: "comment_score", label: "comment_score" },
-  { key: "relative_velocity_score", label: "relative_velocity_score" },
-  { key: "pre_score", label: "pre_score" },
-  { key: "opportunity_tier", label: "opportunity_tier" },
   { key: "status", label: "status" }
 ];
 
@@ -52,10 +52,33 @@ function normalizeCell(value: unknown): string | number {
   return String(value);
 }
 
+function buildChannelUrl(result: CreatorResult): string {
+  const channelId = result.channel_id?.trim();
+  if (channelId) {
+    return `https://www.youtube.com/channel/${channelId}`;
+  }
+  return "";
+}
+
 export function createExportRows(results: CreatorResult[]): Record<string, string | number>[] {
-  return results.map((result) =>
-    Object.fromEntries(exportColumns.map((column) => [column.label, normalizeCell(result[column.key])]))
-  );
+  return results.map((result) => {
+    const row: ExportRow = {
+      keyword: result.keyword ?? "",
+      representative_title: result.title ?? "",
+      channel_title: result.channel_title ?? "",
+      channel_url: buildChannelUrl(result),
+      channel_id: result.channel_id ?? "",
+      channel_country: result.channel_country ?? "",
+      channel_country_source: result.channel_country_source ?? "",
+      video_language: result.video_language ?? "",
+      published_at: result.published_at ?? "",
+      views: result.views ?? "",
+      subscribers: result.subscribers ?? "",
+      status: result.status ?? ""
+    };
+
+    return Object.fromEntries(exportColumns.map((column) => [column.label, normalizeCell(row[column.key])]));
+  });
 }
 
 export function writeCsvExport(filePath: string, rows: Record<string, string | number>[]): void {

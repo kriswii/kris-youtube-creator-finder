@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { env } from "../config/env.js";
 import type { SqliteDatabase } from "../lib/db.js";
@@ -12,7 +13,6 @@ import type { ExportRecord } from "../types/export.js";
 import {
   enrichChannelMetrics,
   enrichVideoMetrics,
-  searchCandidates,
   YouTubeApiError,
   type YouTubeChannelMetric,
   type YouTubeSearchCandidate,
@@ -22,6 +22,11 @@ import { getQuotaSummary, recordQuotaUsage } from "../services/youtube/quotaServ
 import { computePreScore } from "../services/scoring/scoringService.js";
 import { createExportFile } from "../services/export/exportService.js";
 import { scrapePublicChannelContact } from "../services/playwright/contactScrapeService.js";
+import { searchCandidatesViaYouTubeWeb } from "../services/playwright/youtubeWebSearchService.js";
+
+const FIXED_SHORTLIST_SIZE = 50;
+const FIXED_LOOKBACK_DAYS = 14;
+const FIXED_SUBSCRIBER_MAX = 500000;
 
 export interface RouteResult {
   handled: boolean;
@@ -173,6 +178,8 @@ function applyVideoMetric(db: SqliteDatabase, jobId: string, metric: YouTubeVide
       channel_id = COALESCE(NULLIF(?, ''), channel_id),
       channel_title = COALESCE(NULLIF(?, ''), channel_title),
       video_language = COALESCE(NULLIF(?, ''), video_language),
+      video_description = COALESCE(NULLIF(?, ''), video_description),
+      video_tags_json = COALESCE(NULLIF(?, ''), video_tags_json),
       status = 'enriched',
       updated_at = ?
     WHERE job_id = ? AND video_id = ?`
@@ -185,6 +192,8 @@ function applyVideoMetric(db: SqliteDatabase, jobId: string, metric: YouTubeVide
     metric.channel_id,
     metric.channel_title,
     metric.video_language,
+    metric.video_description,
+    stringifyJson(metric.video_tags),
     nowIso(),
     jobId,
     metric.video_id
@@ -220,24 +229,88 @@ function applyChannelMetric(db: SqliteDatabase, jobId: string, metric: YouTubeCh
 
 const PHILIPPINES_EVIDENCE_PATTERN = /\b(pinoy|filipino|philippines|philippine|tagalog)\b|菲律宾|菲律賓/i;
 
+const PHILIPPINES_LANGUAGE_PATTERN = /^(tl|fil)(-|$)|^(en)(-|$)/i;
+
 const COUNTRY_SOURCE_PRIORITY: Record<string, number> = {
   youtube_about_popup: 4,
   youtube_api: 3,
   metadata_keyword: 2,
-  unknown: 1
+  language_hint: 1,
+  unknown: 0
 };
 
 function hasPhilippinesMetadataEvidence(row: CreatorResult): boolean {
   return PHILIPPINES_EVIDENCE_PATTERN.test([row.channel_title, row.channel_description, row.title].filter(Boolean).join(" "));
 }
 
+function hasConflictingCountry(row: CreatorResult, targetCountry: string): boolean {
+  const normalized = row.channel_country?.trim().toUpperCase();
+  return Boolean(normalized && normalized !== targetCountry);
+}
+
+function hasPhilippinesLanguageEvidence(row: CreatorResult): boolean {
+  return PHILIPPINES_LANGUAGE_PATTERN.test(row.video_language ?? "");
+}
+
+function normalizeKeyword(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function parseVideoTags(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function hasKeywordInSearchSignals(row: CreatorResult, keyword: string): boolean {
+  const normalizedKeyword = normalizeKeyword(keyword);
+  if (!normalizedKeyword) return true;
+
+  const haystacks = [
+    row.title ?? "",
+    row.video_description ?? "",
+    ...parseVideoTags(row.video_tags_json)
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return haystacks.includes(normalizedKeyword);
+}
+
+function getPhilippinesMatchLevel(row: CreatorResult): "exact" | "weak" | "none" {
+  const country = row.channel_country?.trim().toUpperCase();
+  if (country === "PH") return "exact";
+  if (country && country !== "PH") return "none";
+  if (hasPhilippinesMetadataEvidence(row)) return "weak";
+  if (hasPhilippinesLanguageEvidence(row) && !hasConflictingCountry(row, "PH")) return "weak";
+  return "none";
+}
+
 function countrySourcePriority(source: string | null | undefined): number {
   return COUNTRY_SOURCE_PRIORITY[source ?? ""] ?? 0;
 }
 
-function updateCountryEvidence(
+function estimateChannelPriority(row: CreatorResult, targetCountry: string): number {
+  const sourceScore = countrySourcePriority(row.channel_country_source) * 10000;
+  const exactCountryBonus = row.channel_country?.trim().toUpperCase() === targetCountry ? 5000 : 0;
+  const metadataBonus = targetCountry === "PH" && hasPhilippinesMetadataEvidence(row) ? 2500 : 0;
+  const languageBonus =
+    targetCountry === "PH" && hasPhilippinesLanguageEvidence(row) && !hasConflictingCountry(row, targetCountry) ? 1200 : 0;
+  const viewScore = Math.min(row.views ?? 0, 1_000_000);
+  const subscriberScore = Math.min(row.subscribers ?? 0, 1_000_000) / 10;
+  const searchRankBonus = row.raw_search_rank ? Math.max(0, 200 - row.raw_search_rank) : 0;
+
+  return sourceScore + exactCountryBonus + metadataBonus + languageBonus + viewScore + subscriberScore + searchRankBonus;
+}
+
+function updateCountryEvidenceForChannel(
   db: SqliteDatabase,
-  rowId: string,
+  jobId: string,
+  channelId: string,
   countryCode: string,
   source: string
 ): void {
@@ -246,8 +319,9 @@ function updateCountryEvidence(
      SET channel_country = ?,
          channel_country_source = ?,
          updated_at = ?
-     WHERE id = ?`
-  ).run(countryCode, source, nowIso(), rowId);
+     WHERE job_id = ?
+       AND channel_id = ?`
+  ).run(countryCode, source, nowIso(), jobId, channelId);
 }
 
 async function strengthenCountrySignals(
@@ -259,41 +333,81 @@ async function strengthenCountrySignals(
 
   const targetCountry = job.channel_country.trim().toUpperCase();
   const resolvedRows = rows.map((row) => ({ ...row }));
-  const scrapeLimit = Math.min(Math.max(job.shortlist_size * 2, 12), resolvedRows.length);
+  const channelBestRow = new Map<string, CreatorResult>();
 
-  for (let index = 0; index < scrapeLimit; index += 1) {
-    const row = resolvedRows[index];
+  for (const row of resolvedRows) {
     if (!row.channel_id || !row.channel_title) continue;
-
-    if (row.channel_country?.toUpperCase() === targetCountry && row.channel_country_source === "youtube_about_popup") {
+    const current = channelBestRow.get(row.channel_id);
+    if (!current) {
+      channelBestRow.set(row.channel_id, row);
       continue;
     }
 
-    try {
-      const channelIdentifier = row.channel_id.startsWith("UC") ? `/channel/${row.channel_id}` : `/@${row.channel_id}`;
-      const scrape = await scrapePublicChannelContact({
-        channelUrl: `https://www.youtube.com${channelIdentifier}`,
-        requireLoggedInBrowser: false,
-        manualAssist: false
-      });
+    const currentPriority = countrySourcePriority(current.channel_country_source);
+    const nextPriority = countrySourcePriority(row.channel_country_source);
+    if (
+      nextPriority > currentPriority ||
+      (nextPriority === currentPriority && (row.views ?? 0) > (current.views ?? 0)) ||
+      (nextPriority === currentPriority &&
+        (row.views ?? 0) === (current.views ?? 0) &&
+        (row.subscribers ?? 0) > (current.subscribers ?? 0))
+    ) {
+      channelBestRow.set(row.channel_id, row);
+    }
+  }
 
-      if (scrape.about_page_country) {
-        row.channel_country = scrape.about_page_country;
-        row.channel_country_source = scrape.about_page_country_source ?? "youtube_about_popup";
-        updateCountryEvidence(db, row.id, row.channel_country, row.channel_country_source);
-        continue;
+  const uniqueChannelRows = [...channelBestRow.values()].sort(
+    (left, right) => estimateChannelPriority(right, targetCountry) - estimateChannelPriority(left, targetCountry)
+  );
+  const scrapeLimit = Math.min(Math.max(job.shortlist_size * 2, 12), uniqueChannelRows.length);
+
+  for (let index = 0; index < scrapeLimit; index += 1) {
+    const row = uniqueChannelRows[index];
+    if (!row.channel_id || !row.channel_title) continue;
+
+    let resolvedCountry = row.channel_country?.toUpperCase() ?? null;
+    let resolvedSource = row.channel_country_source ?? null;
+
+    if (!(resolvedCountry === targetCountry && resolvedSource === "youtube_about_popup")) {
+      try {
+        const channelIdentifier = row.channel_id.startsWith("UC") ? `/channel/${row.channel_id}` : `/@${row.channel_id}`;
+        const scrape = await scrapePublicChannelContact({
+          channelUrl: `https://www.youtube.com${channelIdentifier}`,
+          requireLoggedInBrowser: false,
+          manualAssist: false
+        });
+
+        if (scrape.about_page_country) {
+          resolvedCountry = scrape.about_page_country.toUpperCase();
+          resolvedSource = scrape.about_page_country_source ?? "youtube_about_popup";
+        }
+      } catch {
+        // Best-effort country enrichment; fallback to existing metadata below.
       }
-    } catch {
-      // Best-effort country enrichment; fallback to existing metadata below.
     }
 
-    if (targetCountry === "PH" && hasPhilippinesMetadataEvidence(row)) {
-      row.channel_country = "PH";
-      row.channel_country_source = row.channel_country_source ?? "metadata_keyword";
-      updateCountryEvidence(db, row.id, "PH", row.channel_country_source);
-    } else if (row.channel_country?.toUpperCase() === targetCountry && !row.channel_country_source) {
-      row.channel_country_source = "youtube_api";
-      updateCountryEvidence(db, row.id, row.channel_country, "youtube_api");
+    if (targetCountry === "PH" && !resolvedCountry && !hasConflictingCountry(row, targetCountry)) {
+      if (hasPhilippinesMetadataEvidence(row)) {
+        resolvedCountry = "PH";
+        resolvedSource = resolvedSource ?? "metadata_keyword";
+      } else if (hasPhilippinesLanguageEvidence(row)) {
+        resolvedCountry = "PH";
+        resolvedSource = resolvedSource ?? "language_hint";
+      }
+    }
+
+    if (resolvedCountry === targetCountry && !resolvedSource) {
+      resolvedSource = "youtube_api";
+    }
+
+    if (resolvedCountry && resolvedSource) {
+      updateCountryEvidenceForChannel(db, job.id, row.channel_id, resolvedCountry, resolvedSource);
+
+      for (const candidate of resolvedRows) {
+        if (candidate.channel_id !== row.channel_id) continue;
+        candidate.channel_country = resolvedCountry;
+        candidate.channel_country_source = resolvedSource;
+      }
     }
   }
 
@@ -301,35 +415,10 @@ async function strengthenCountrySignals(
 }
 
 function buildSearchKeywords(job: JobRecord): string[] {
-  const normalized = job.keyword.trim();
-  if (job.channel_country !== "PH") return [normalized];
-
-  const base = normalized
-    .replace(/菲律宾|菲律賓/gi, "")
-    .replace(/\bphilippines\b/gi, "")
-    .replace(/\bphilippine\b/gi, "")
-    .replace(/\bfilipino\b/gi, "")
-    .replace(/\bpinoy\b/gi, "")
-    .replace(/\btagalog\b/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  const candidates = [
-    normalized,
-    `${base} filipino`,
-    `${base} pinoy`,
-    `${base} philippines`,
-    `${base} tagalog`,
-    `philippines ${base}`,
-    `filipino ${base}`,
-    `pinoy ${base}`
-  ];
-
-  return [...new Set(candidates.map((value) => value.trim()).filter(Boolean))];
+  return [job.keyword.trim()];
 }
 
 async function runSearch(db: SqliteDatabase, job: JobRecord): Promise<{ candidate_count: number }> {
-  if (!env.YOUTUBE_API_KEY) throw new Error("Missing YOUTUBE_API_KEY");
   const searchKeywords = buildSearchKeywords(job);
   const mergedCandidates: YouTubeSearchCandidate[] = [];
   const seenVideoIds = new Set<string>();
@@ -339,10 +428,8 @@ async function runSearch(db: SqliteDatabase, job: JobRecord): Promise<{ candidat
   for (let index = 0; index < searchKeywords.length && mergedCandidates.length < job.max_candidates; index += 1) {
     const remaining = job.max_candidates - mergedCandidates.length;
     const searchKeyword = searchKeywords[index];
-    const searchResult = await searchCandidates({
-      apiKey: env.YOUTUBE_API_KEY,
+    const searchResult = await searchCandidatesViaYouTubeWeb({
       keyword: searchKeyword,
-      lookbackDays: job.lookback_days,
       maxCandidates: remaining
     });
 
@@ -362,19 +449,6 @@ async function runSearch(db: SqliteDatabase, job: JobRecord): Promise<{ candidat
 
   runInTransaction(db, () => {
     for (const candidate of mergedCandidates) upsertSearchCandidate(db, job, candidate);
-    if (totalPagesFetched > 0) {
-      recordQuotaUsage(db, {
-        jobId: job.id,
-        actionType: "search.list",
-        units: totalPagesFetched * 100,
-        detail: {
-          keyword: job.keyword,
-          search_keywords: searchKeywords,
-          pages_fetched: totalPagesFetched,
-          candidate_count: mergedCandidates.length
-        }
-      });
-    }
     updateJobStage(db, job.id, "search");
   });
   return { candidate_count: mergedCandidates.length };
@@ -495,15 +569,12 @@ function runPreScore(db: SqliteDatabase, job: JobRecord): { scored_count: number
 async function runShortlist(db: SqliteDatabase, job: JobRecord): Promise<{ shortlisted_count: number; rejected_count: number }> {
   const hasCountryFilter = Boolean(job.channel_country);
   const countryCode = job.channel_country?.trim().toUpperCase() ?? "";
-  const candidatePoolSize = Math.max(job.shortlist_size * 4, 20);
+  const candidatePoolSize = Math.max(job.max_candidates, job.shortlist_size * 6, 30);
   const query = `SELECT * FROM results
       WHERE job_id = ?
-        AND pre_score IS NOT NULL
         AND subscribers BETWEEN ? AND ?
-        AND days_since_publish <= ?
-        AND views >= 3000
-        AND pre_score >= ?
-      ORDER BY pre_score DESC, raw_search_rank ASC
+        AND (days_since_publish IS NULL OR days_since_publish <= ?)
+      ORDER BY views DESC, subscribers DESC, raw_search_rank ASC
       LIMIT ?`;
 
   const candidateRows = db
@@ -513,33 +584,36 @@ async function runShortlist(db: SqliteDatabase, job: JobRecord): Promise<{ short
       job.subscriber_min,
       job.subscriber_max,
       job.lookback_days,
-      job.minimum_pre_score,
       candidatePoolSize
     ) as unknown as CreatorResult[];
 
   const strengthenedRows = hasCountryFilter ? await strengthenCountrySignals(db, job, candidateRows) : candidateRows;
   const shortlistedRows = strengthenedRows
     .filter((row) => {
+      if (!hasKeywordInSearchSignals(row, job.keyword)) return false;
       if (!hasCountryFilter) return true;
-      return row.channel_country?.trim().toUpperCase() === countryCode;
+      if (countryCode !== "PH") return row.channel_country?.trim().toUpperCase() === countryCode;
+      return getPhilippinesMatchLevel(row) !== "none";
     })
     .sort((left, right) => {
       const sourceDiff = countrySourcePriority(right.channel_country_source) - countrySourcePriority(left.channel_country_source);
       if (sourceDiff !== 0) return sourceDiff;
-      const scoreDiff = (right.pre_score ?? 0) - (left.pre_score ?? 0);
-      if (scoreDiff !== 0) return scoreDiff;
+      const viewDiff = (right.views ?? 0) - (left.views ?? 0);
+      if (viewDiff !== 0) return viewDiff;
+      const subscriberDiff = (right.subscribers ?? 0) - (left.subscribers ?? 0);
+      if (subscriberDiff !== 0) return subscriberDiff;
       return (left.raw_search_rank ?? Number.MAX_SAFE_INTEGER) - (right.raw_search_rank ?? Number.MAX_SAFE_INTEGER);
     })
     .slice(0, job.shortlist_size);
 
   const shortlistIds = new Set(shortlistedRows.map((row) => row.id));
-  const preScoredRows = db.prepare("SELECT id FROM results WHERE job_id = ? AND pre_score IS NOT NULL").all(job.id) as {
+  const candidateRowsForStatus = db.prepare("SELECT id FROM results WHERE job_id = ?").all(job.id) as {
     id: string;
   }[];
   let rejectedCount = 0;
 
   runInTransaction(db, () => {
-    for (const row of preScoredRows) {
+    for (const row of candidateRowsForStatus) {
       const status = shortlistIds.has(row.id) ? "shortlisted" : "rejected";
       if (status === "rejected") rejectedCount += 1;
       db.prepare("UPDATE results SET status = ?, updated_at = ? WHERE id = ?").run(status, nowIso(), row.id);
@@ -550,15 +624,75 @@ async function runShortlist(db: SqliteDatabase, job: JobRecord): Promise<{ short
   return { shortlisted_count: shortlistedRows.length, rejected_count: rejectedCount };
 }
 
+function normalizeCountryCode(value: string | null | undefined): string {
+  const normalized = (value ?? "").trim();
+  if (!normalized) return "";
+  const upper = normalized.toUpperCase();
+  if (["PH", "PHILIPPINES", "FILIPINO", "PINOY"].includes(upper) || ["菲律宾", "菲律賓"].includes(normalized)) {
+    return "PH";
+  }
+  return upper;
+}
+
+function buildChannelDedupKey(row: CreatorResult): string {
+  const channelId = row.channel_id?.trim();
+  if (channelId) return `id:${channelId}`;
+  return `title:${(row.channel_title ?? row.title ?? "").trim().toLowerCase()}`;
+}
+
+function isCountryMatchForExport(row: CreatorResult, selectedCountry: string): boolean {
+  if (!selectedCountry) return true;
+  if (selectedCountry === "PH") return getPhilippinesMatchLevel(row) !== "none";
+  return normalizeCountryCode(row.channel_country) === selectedCountry;
+}
+
+function scoreExportRow(row: CreatorResult, selectedCountry: string): number {
+  const sourceScore = countrySourcePriority(row.channel_country_source) * 1_000_000;
+  const countryScore =
+    !selectedCountry
+      ? 0
+      : selectedCountry === "PH"
+        ? getPhilippinesMatchLevel(row) === "exact"
+          ? 500_000
+          : getPhilippinesMatchLevel(row) === "weak"
+            ? 250_000
+            : 0
+        : normalizeCountryCode(row.channel_country) === selectedCountry
+          ? 500_000
+          : 0;
+  const viewScore = Math.min(row.views ?? 0, 10_000_000);
+  const subscriberScore = Math.min(row.subscribers ?? 0, 10_000_000) / 10;
+  const searchRankScore = row.raw_search_rank ? Math.max(0, 10_000 - row.raw_search_rank) : 0;
+  return sourceScore + countryScore + viewScore + subscriberScore + searchRankScore;
+}
+
+function prepareExportResults(job: JobRecord, rows: CreatorResult[]): CreatorResult[] {
+  const selectedCountry = normalizeCountryCode(job.channel_country);
+  const deduped = new Map<string, CreatorResult>();
+
+  for (const row of rows) {
+    if (!isCountryMatchForExport(row, selectedCountry)) continue;
+
+    const key = buildChannelDedupKey(row);
+    const current = deduped.get(key);
+    if (!current || scoreExportRow(row, selectedCountry) > scoreExportRow(current, selectedCountry)) {
+      deduped.set(key, row);
+    }
+  }
+
+  return [...deduped.values()].sort((left, right) => scoreExportRow(right, selectedCountry) - scoreExportRow(left, selectedCountry));
+}
+
 function runExport(db: SqliteDatabase, job: JobRecord, format: "csv" | "xlsx"): ExportRecord {
   const results = db
     .prepare("SELECT * FROM results WHERE job_id = ? ORDER BY pre_score DESC, raw_search_rank ASC")
     .all(job.id) as unknown as CreatorResult[];
+  const exportResults = prepareExportResults(job, results);
   const timestamp = nowIso();
   const exportId = randomUUID();
 
   try {
-    const output = createExportFile(job.id, format, results);
+    const output = createExportFile(job.id, format, exportResults);
     const record: ExportRecord = {
       id: exportId,
       job_id: job.id,
@@ -632,13 +766,19 @@ export async function handleJobsRoute(
     if (req.method !== "POST") return methodNotAllowed(res);
     const body = await readJson(req);
     const config = createJobSchema.parse(body);
+    const normalizedConfig = {
+      ...config,
+      lookback_days: FIXED_LOOKBACK_DAYS,
+      subscriber_max: FIXED_SUBSCRIBER_MAX,
+      shortlist_size: FIXED_SHORTLIST_SIZE
+    };
     const timestamp = nowIso();
     const job: JobRecord = {
       id: randomUUID(),
-      ...config,
+      ...normalizedConfig,
       status: "draft",
       stage: "created",
-      config_json: stringifyJson(config),
+      config_json: stringifyJson(normalizedConfig),
       error_message: null,
       created_at: timestamp,
       updated_at: timestamp
@@ -702,7 +842,9 @@ export async function handleJobsRoute(
         job_id: jobId,
         action,
         export: result,
-        download_url: `http://localhost:${env.PORT}/api/exports/${result.id}/download`
+        download_url: `http://localhost:${env.PORT}/api/exports/${result.id}/download`,
+        filename: path.basename(result.file_path),
+        file_path: result.file_path
       });
       return { handled: true };
     }

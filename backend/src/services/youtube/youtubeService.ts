@@ -24,7 +24,7 @@ export interface YouTubeSearchCandidate {
   published_at: string;
   raw_search_rank: number;
   search_page: number;
-  search_source: "youtube_api_search";
+  search_source: "youtube_api_search" | "youtube_web_search";
   channel_id: string;
   channel_title: string;
 }
@@ -39,6 +39,8 @@ export interface YouTubeVideoMetric {
   channel_id: string;
   channel_title: string;
   video_language: string;
+  video_description: string;
+  video_tags: string[];
 }
 
 export interface YouTubeChannelMetric {
@@ -154,6 +156,8 @@ export async function searchCandidates(input: SearchCandidatesInput): Promise<Se
           channelTitle?: string;
           defaultAudioLanguage?: string;
           defaultLanguage?: string;
+          description?: string;
+          tags?: string[];
         };
       }>;
     }>(
@@ -218,6 +222,8 @@ export async function enrichVideoMetrics(
           channelTitle?: string;
           defaultAudioLanguage?: string;
           defaultLanguage?: string;
+          description?: string;
+          tags?: string[];
         };
         statistics?: {
           viewCount?: string;
@@ -251,7 +257,9 @@ export async function enrichVideoMetrics(
         comments: toInt(stats.commentCount),
         channel_id: snippet.channelId || "",
         channel_title: snippet.channelTitle || "",
-        video_language: snippet.defaultAudioLanguage || snippet.defaultLanguage || ""
+        video_language: snippet.defaultAudioLanguage || snippet.defaultLanguage || "",
+        video_description: snippet.description || "",
+        video_tags: snippet.tags || []
       });
     }
   }

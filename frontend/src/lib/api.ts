@@ -54,8 +54,11 @@ export async function runStage(
   });
 }
 
-export async function runExport(jobId: string, format: "csv" | "xlsx"): Promise<{ download_url: string }> {
-  return request<{ ok: boolean; download_url: string }>(`/api/jobs/${jobId}/run-export`, {
+export async function runExport(
+  jobId: string,
+  format: "csv" | "xlsx"
+): Promise<{ download_url: string; filename?: string; file_path?: string }> {
+  return request<{ ok: boolean; download_url: string; filename?: string; file_path?: string }>(`/api/jobs/${jobId}/run-export`, {
     method: "POST",
     body: JSON.stringify({ format })
   });

@@ -30,6 +30,8 @@ function createResult(overrides: Partial<CreatorResult> = {}): CreatorResult {
     channel_country: null,
     channel_country_source: null,
     video_language: null,
+    video_description: null,
+    video_tags_json: null,
     days_since_publish: 4,
     engagement_rate: 0.04,
     comment_rate: 0.005,

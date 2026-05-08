@@ -1,15 +1,15 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { createJob, fetchJob, fetchQuotaSummary, runExport, runStage } from "./lib/api";
-import type { CreateJobInput, CreatorResult, JobDetailResponse, OpportunityTier, QuotaSummary, ResultStatus } from "./types";
+import type { CreateJobInput, CreatorResult, JobDetailResponse, QuotaSummary, ResultStatus } from "./types";
 
 const defaultForm: CreateJobInput = {
   keyword: "",
-  lookback_days: 30,
-  subscriber_min: 3000,
-  subscriber_max: 50000,
-  max_candidates: 50,
-  shortlist_size: 20,
-  minimum_pre_score: 55,
+  lookback_days: 14,
+  subscriber_min: 100,
+  subscriber_max: 500000,
+  max_candidates: 500,
+  shortlist_size: 50,
+  minimum_pre_score: 0,
   channel_country: ""
 };
 
@@ -20,48 +20,9 @@ type SortKey =
   | "channel_title"
   | "subscribers"
   | "views"
-  | "likes"
-  | "comments"
-  | "days_since_publish"
-  | "engagement_rate"
-  | "view_sub_ratio"
-  | "pre_score"
-  | "opportunity_tier"
+  | "channel_country"
+  | "video_language"
   | "status";
-
-const metricHelpText = {
-  comment_rate: {
-    label: "评论率",
-    formula: "comments / max(views, 1)",
-    meaning: "评论数占播放量的比例，越高通常说明观众更愿意表达观点。"
-  },
-  engagement_rate: {
-    label: "互动率",
-    formula: "(likes + comments * 2) / max(views, 1)",
-    meaning: "综合点赞和评论的参与强度，其中评论权重更高。"
-  },
-  view_sub_ratio: {
-    label: "播粉比",
-    formula: "views / max(subscribers, 1)",
-    meaning: "单条视频播放量相对于频道粉丝体量的表现。"
-  },
-  relative_velocity: {
-    label: "相对传播速度",
-    formula: "views / days_since_publish / max(subscribers, 1)",
-    meaning: "考虑发布时间和账号体量后的传播效率。"
-  },
-  opportunity_tier: {
-    label: "机会层级",
-    formula: "A >= 85，B >= 70，C >= 55，D < 55",
-    meaning: "按 Pre Score 分层，帮助快速判断优先关注范围。"
-  },
-  pre_score: {
-    label: "Pre Score",
-    formula:
-      "30*sub_fit_score + 30*view_sub_score + 20*engagement_score + 10*comment_score + 10*relative_velocity_score",
-    meaning: "基于固定规则计算的预评分，用来优先发现相对表现更强的创作者。"
-  }
-} as const;
 
 const stageLabelMap = {
   created: "已创建",
@@ -83,22 +44,6 @@ const statusLabelMap: Record<ResultStatus, string> = {
   rejected: "已淘汰",
   failed: "失败"
 };
-
-function MetricHelp(props: { metric: keyof typeof metricHelpText; placement?: "default" | "top" }) {
-  const info = metricHelpText[props.metric];
-  const text = `${info.label}\n公式：${info.formula}\n意义：${info.meaning}`;
-
-  return (
-    <span
-      className={`metric-help ${props.placement === "top" ? "metric-help--top" : ""}`}
-      aria-label={text}
-      data-tooltip={text}
-      tabIndex={0}
-    >
-      ?
-    </span>
-  );
-}
 
 function normalizeAvatarUrl(url: string): string {
   return url.replace("https://yt3.ggpht.com/", "https://yt3.googleusercontent.com/");
@@ -158,7 +103,20 @@ function formatCountrySource(value: string | null | undefined): string {
 }
 
 function normalizeCountryCode(value: string | null | undefined): string {
-  return (value ?? "").trim().toUpperCase();
+  const normalized = (value ?? "").trim();
+  if (!normalized) return "";
+  const upper = normalized.toUpperCase();
+  if (["PH", "PHILIPPINES", "FILIPINO", "PINOY"].includes(upper) || ["菲律宾", "菲律賓"].includes(normalized)) {
+    return "PH";
+  }
+  return upper;
+}
+
+function allowsCountryDisplay(selectedCountry: string, resultCountryRaw: string | null | undefined): boolean {
+  const resultCountry = normalizeCountryCode(resultCountryRaw);
+  if (!selectedCountry) return true;
+  if (selectedCountry === "PH") return resultCountry === "PH" || !resultCountry;
+  return resultCountry === selectedCountry;
 }
 
 function compareValues(
@@ -181,8 +139,40 @@ function sortResults(results: CreatorResult[], sortKey: SortKey, sortDirection: 
   return [...results].sort((left, right) => {
     const compared = compareValues(left[sortKey], right[sortKey], sortDirection);
     if (compared !== 0) return compared;
-    return compareValues(left.pre_score, right.pre_score, "desc");
+    const viewCompared = compareValues(left.views, right.views, "desc");
+    if (viewCompared !== 0) return viewCompared;
+    return compareValues(left.subscribers, right.subscribers, "desc");
   });
+}
+
+function dedupeChannelResults(results: CreatorResult[]): CreatorResult[] {
+  const bestByChannel = new Map<string, CreatorResult>();
+
+  for (const result of results) {
+    const key = result.channel_id || `title:${(result.channel_title ?? result.title ?? "").trim().toLowerCase()}`;
+    const current = bestByChannel.get(key);
+    if (!current) {
+      bestByChannel.set(key, result);
+      continue;
+    }
+
+    const currentSource = formatCountrySource(current.channel_country_source);
+    const nextSource = formatCountrySource(result.channel_country_source);
+    const currentRank =
+      currentSource === "主页更多" ? 4 : currentSource === "API" ? 3 : currentSource === "文案判断" ? 2 : currentSource === "未标注" ? 0 : 1;
+    const nextRank =
+      nextSource === "主页更多" ? 4 : nextSource === "API" ? 3 : nextSource === "文案判断" ? 2 : nextSource === "未标注" ? 0 : 1;
+
+    if (
+      nextRank > currentRank ||
+      (nextRank === currentRank && (result.views ?? 0) > (current.views ?? 0)) ||
+      (nextRank === currentRank && (result.views ?? 0) === (current.views ?? 0) && (result.subscribers ?? 0) > (current.subscribers ?? 0))
+    ) {
+      bestByChannel.set(key, result);
+    }
+  }
+
+  return [...bestByChannel.values()];
 }
 
 function summarizeActionResult(action: string, payload: unknown): string {
@@ -213,12 +203,10 @@ export default function App() {
   const [quotaSummary, setQuotaSummary] = useState<QuotaSummary | null>(null);
   const [showSearchOverlay, setShowSearchOverlay] = useState(false);
 
-  const [filterSubscriberMin, setFilterSubscriberMin] = useState<number>(3000);
-  const [filterSubscriberMax, setFilterSubscriberMax] = useState<number>(50000);
-  const [filterPreScoreMin, setFilterPreScoreMin] = useState<number>(55);
-  const [filterTier, setFilterTier] = useState<OpportunityTier | "all">("all");
+  const [filterSubscriberMin, setFilterSubscriberMin] = useState<number>(100);
+  const [filterSubscriberMax, setFilterSubscriberMax] = useState<number>(5000000);
   const [filterStatus, setFilterStatus] = useState<ResultStatus | "all">("all");
-  const [sortKey, setSortKey] = useState<SortKey>("pre_score");
+  const [sortKey, setSortKey] = useState<SortKey>("views");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
 
   async function refreshQuotaSummary(): Promise<void> {
@@ -250,40 +238,46 @@ export default function App() {
   }, [jobData]);
 
   const filteredResults = useMemo(() => {
-    const results = jobData?.results ?? [];
-    const selectedCountry = normalizeCountryCode(jobData?.job.channel_country);
+    const results = dedupeChannelResults(jobData?.results ?? []);
+    const selectedCountry = normalizeCountryCode(jobData?.job.channel_country || form.channel_country);
     return sortResults(
       results.filter((result) => {
         return (
-          (!selectedCountry || normalizeCountryCode(result.channel_country) === selectedCountry) &&
+          allowsCountryDisplay(selectedCountry, result.channel_country) &&
           result.subscribers >= filterSubscriberMin &&
           result.subscribers <= filterSubscriberMax &&
-          (result.pre_score ?? 0) >= filterPreScoreMin &&
-          (filterTier === "all" || result.opportunity_tier === filterTier) &&
           (filterStatus === "all" || result.status === filterStatus)
         );
       }),
       sortKey,
       sortDirection
     );
-  }, [jobData, filterPreScoreMin, filterStatus, filterSubscriberMax, filterSubscriberMin, filterTier, sortDirection, sortKey]);
+  }, [form.channel_country, jobData, filterStatus, filterSubscriberMax, filterSubscriberMin, sortDirection, sortKey]);
 
   const shortlistedCount = useMemo(
-    () => (jobData?.results ?? []).filter((result) => result.status === "shortlisted").length,
+    () => dedupeChannelResults((jobData?.results ?? []).filter((result) => result.status === "shortlisted")).length,
     [jobData]
   );
 
   const matchedCountryCount = useMemo(() => {
     const selectedCountry = normalizeCountryCode(jobData?.job.channel_country);
     if (!selectedCountry) return null;
-    return (jobData?.results ?? []).filter((result) => normalizeCountryCode(result.channel_country) === selectedCountry).length;
+    return dedupeChannelResults(jobData?.results ?? []).filter((result) => normalizeCountryCode(result.channel_country) === selectedCountry).length;
   }, [jobData]);
 
-  const averagePreScore = useMemo(() => {
-    const values = (jobData?.results ?? []).map((result) => result.pre_score).filter((value): value is number => value !== null && value !== undefined);
+  const averageViews = useMemo(() => {
+    const values = dedupeChannelResults(jobData?.results ?? []).map((result) => result.views).filter((value): value is number => value !== null && value !== undefined);
     if (!values.length) return null;
     return values.reduce((sum, value) => sum + value, 0) / values.length;
   }, [jobData]);
+
+  const weakCountryCount = useMemo(
+    () =>
+      dedupeChannelResults(jobData?.results ?? []).filter((result) =>
+        ["metadata_keyword", "language_hint"].includes(result.channel_country_source ?? "")
+      ).length,
+    [jobData]
+  );
 
   function setFormField<Key extends keyof CreateJobInput>(key: Key, value: CreateJobInput[Key]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -292,7 +286,7 @@ export default function App() {
   function handleSort(nextKey: SortKey) {
     setSortDirection((currentDirection) => {
       if (sortKey === nextKey) return currentDirection === "asc" ? "desc" : "asc";
-      return nextKey === "title" || nextKey === "channel_title" || nextKey === "status" || nextKey === "opportunity_tier" ? "asc" : "desc";
+      return nextKey === "title" || nextKey === "channel_title" || nextKey === "status" || nextKey === "channel_country" || nextKey === "video_language" ? "asc" : "desc";
     });
     setSortKey(nextKey);
   }
@@ -320,7 +314,7 @@ export default function App() {
     setMessage(null);
 
     try {
-      const normalizedCountry = form.channel_country?.trim().toUpperCase();
+      const normalizedCountry = normalizeCountryCode(form.channel_country);
       const input: CreateJobInput = {
         ...form,
         keyword,
@@ -331,17 +325,15 @@ export default function App() {
       await runStage(job.id, "run-search");
       await runStage(job.id, "run-enrichment");
       await runStage(job.id, "run-pre-score");
-      if (normalizedCountry) {
-        await runStage(job.id, "run-shortlist");
-      }
+      await runStage(job.id, "run-shortlist");
       await refreshJob(job.id);
       await refreshQuotaSummary();
       setMode("workspace");
       setShowSearchOverlay(false);
       setMessage(
         normalizedCountry
-          ? `已完成“${keyword}”的候选搜索、指标补全、预评分和 ${normalizedCountry} 国家过滤。`
-          : `已完成“${keyword}”的候选搜索、指标补全和预评分。`
+          ? `已完成“${keyword}”的候选搜索、描述关键词校验和 ${normalizedCountry} 国家判断。弱证据频道也会保留给你判断。`
+          : `已完成“${keyword}”的候选搜索、描述关键词校验和基础补全。`
       );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "搜索失败，请稍后重试。");
@@ -376,8 +368,8 @@ export default function App() {
     try {
       const result = await runExport(jobData.job.id, "xlsx");
       await refreshJob(jobData.job.id);
-      window.open(result.download_url, "_blank", "noopener,noreferrer");
-      setMessage("XLSX 导出已生成。");
+      const savedPath = result.file_path ?? result.filename ?? "backend/data/exports";
+      setMessage(`Excel 已生成到本地：${savedPath}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "导出失败，请稍后重试。");
     } finally {
@@ -527,7 +519,7 @@ export default function App() {
                   <input
                     value={form.keyword}
                     onChange={(event) => setFormField("keyword", event.target.value)}
-                    placeholder="输入关键词，直接跑完候选发现、补全指标和预评分..."
+                    placeholder="输入你自己想搜的关键词，我们不会自动扩词..."
                     onKeyDown={(event) => {
                       if (event.key === "Enter") {
                         event.preventDefault();
@@ -542,33 +534,38 @@ export default function App() {
                 <div className="hero-config-grid">
                   <label>
                     <span>国家/地区</span>
-                    <input value={form.channel_country ?? ""} onChange={(event) => setFormField("channel_country", event.target.value.toUpperCase())} placeholder="留空不限，例如 PH / US / JP" maxLength={2} />
+                    <input
+                      value={form.channel_country ?? ""}
+                      onChange={(event) => setFormField("channel_country", normalizeCountryCode(event.target.value))}
+                      placeholder="留空不限，例如 PH 或 菲律宾"
+                    />
                   </label>
                   <label>
                     <span>回看天数</span>
-                    <input type="number" value={form.lookback_days} onChange={(event) => setFormField("lookback_days", Number(event.target.value) || 30)} />
+                    <input type="number" value={14} readOnly />
                   </label>
                   <label>
                     <span>最大候选数</span>
-                    <input type="number" value={form.max_candidates} onChange={(event) => setFormField("max_candidates", Number(event.target.value) || 50)} />
+                    <input
+                      type="number"
+                      value={form.max_candidates}
+                      min={1}
+                      onChange={(event) => setFormField("max_candidates", Number(event.target.value) || 500)}
+                    />
                   </label>
                   <label>
                     <span>入围数量</span>
-                    <input type="number" value={form.shortlist_size} onChange={(event) => setFormField("shortlist_size", Number(event.target.value) || 20)} />
+                    <input type="number" value={50} readOnly />
                   </label>
                   <label>
                     <span>最小粉丝数</span>
-                    <input type="number" value={form.subscriber_min} onChange={(event) => setFormField("subscriber_min", Number(event.target.value) || 3000)} />
+                    <input type="number" value={form.subscriber_min} onChange={(event) => setFormField("subscriber_min", Number(event.target.value) || 100)} />
                   </label>
-                  <label>
-                    <span>最大粉丝数</span>
-                    <input type="number" value={form.subscriber_max} onChange={(event) => setFormField("subscriber_max", Number(event.target.value) || 50000)} />
-                  </label>
-                  <label>
-                    <span>最低 Pre Score</span>
-                    <input type="number" value={form.minimum_pre_score} onChange={(event) => setFormField("minimum_pre_score", Number(event.target.value) || 55)} />
-                  </label>
-                </div>
+                    <label>
+                      <span>最大粉丝数</span>
+                      <input type="number" value={500000} readOnly />
+                    </label>
+                  </div>
               </div>
             </div>
           </section>
@@ -584,7 +581,7 @@ export default function App() {
             </div>
             <div className="stat-panel">
               <div className="stat-label">结果总数</div>
-              <div className="stat-value">{jobData?.results.length ?? 0}</div>
+              <div className="stat-value">{filteredResults.length}</div>
             </div>
             <div className="stat-panel">
               <div className="stat-label">国家命中</div>
@@ -595,8 +592,12 @@ export default function App() {
               <div className="stat-value">{shortlistedCount}</div>
             </div>
             <div className="stat-panel">
-              <div className="stat-label">平均 Pre Score</div>
-              <div className="stat-value">{averagePreScore?.toFixed(1) ?? "-"}</div>
+              <div className="stat-label">弱证据命中</div>
+              <div className="stat-value">{weakCountryCount}</div>
+            </div>
+            <div className="stat-panel">
+              <div className="stat-label">平均播放量</div>
+              <div className="stat-value">{averageViews ? formatCompactNumber(Math.round(averageViews)) : "-"}</div>
             </div>
           </section>
 
@@ -608,7 +609,7 @@ export default function App() {
               <div className="workspace-panel__header">
                 <div>
                   <h2>候选结果</h2>
-                  <p>按体量、表现和机会层级筛选，选择一条结果查看完整指标。</p>
+                  <p>结果会先经过视频描述 / tags 的关键词校验，再按菲律宾证据、播放量和粉丝数排序。</p>
                 </div>
               </div>
 
@@ -620,20 +621,6 @@ export default function App() {
                 <label>
                   <span>最大粉丝数</span>
                   <input type="number" value={filterSubscriberMax} onChange={(event) => setFilterSubscriberMax(Number(event.target.value) || 0)} />
-                </label>
-                <label>
-                  <span>最低 Pre Score</span>
-                  <input type="number" value={filterPreScoreMin} onChange={(event) => setFilterPreScoreMin(Number(event.target.value) || 0)} />
-                </label>
-                <label>
-                  <span>机会层级</span>
-                  <select value={filterTier} onChange={(event) => setFilterTier(event.target.value as OpportunityTier | "all")}>
-                    <option value="all">全部</option>
-                    <option value="A">A</option>
-                    <option value="B">B</option>
-                    <option value="C">C</option>
-                    <option value="D">D</option>
-                  </select>
                 </label>
                 <label>
                   <span>状态</span>
@@ -656,13 +643,11 @@ export default function App() {
                     <tr>
                       <th><button className="sort-button" onClick={() => handleSort("title")}>标题{sortIndicator("title")}</button></th>
                       <th><button className="sort-button" onClick={() => handleSort("channel_title")}>频道{sortIndicator("channel_title")}</button></th>
-                      <th><span className="table-label">国家</span></th>
-                      <th><span className="table-label">语言</span></th>
+                      <th><button className="sort-button" onClick={() => handleSort("channel_country")}>国家{sortIndicator("channel_country")}</button></th>
+                      <th><button className="sort-button" onClick={() => handleSort("video_language")}>语言{sortIndicator("video_language")}</button></th>
                       <th className="numeric"><button className="sort-button" onClick={() => handleSort("subscribers")}>粉丝{sortIndicator("subscribers")}</button></th>
                       <th className="numeric"><button className="sort-button" onClick={() => handleSort("views")}>播放量{sortIndicator("views")}</button></th>
-                      <th className="numeric"><button className="sort-button" onClick={() => handleSort("engagement_rate")}>互动率<MetricHelp metric="engagement_rate" />{sortIndicator("engagement_rate")}</button></th>
-                      <th className="numeric"><button className="sort-button" onClick={() => handleSort("view_sub_ratio")}>播粉比<MetricHelp metric="view_sub_ratio" />{sortIndicator("view_sub_ratio")}</button></th>
-                      <th className="centered"><button className="sort-button sort-button--accent" onClick={() => handleSort("pre_score")}>Pre Score<MetricHelp metric="pre_score" placement="top" />{sortIndicator("pre_score")}</button></th>
+                      <th><span className="table-label">国家来源</span></th>
                       <th className="centered"><button className="sort-button" onClick={() => handleSort("status")}>状态{sortIndicator("status")}</button></th>
                     </tr>
                   </thead>
@@ -687,9 +672,7 @@ export default function App() {
                         <td>{result.video_language || "无"}</td>
                         <td className="numeric">{formatCompactNumber(result.subscribers)}</td>
                         <td className="numeric">{formatCompactNumber(result.views)}</td>
-                        <td className={`numeric ${((result.engagement_rate ?? 0) > 0.05 ? "metric-positive" : "")}`}>{formatPercent(result.engagement_rate)}</td>
-                        <td className={`numeric ${((result.view_sub_ratio ?? 0) > 0.15 ? "metric-positive" : "")}`}>{formatPercent(result.view_sub_ratio)}</td>
-                        <td className="centered"><span className={`score-pill ${selectedResult?.id === result.id ? "score-pill--selected" : ""}`}>{result.pre_score?.toFixed(0) ?? "-"}</span></td>
+                        <td>{formatCountrySource(result.channel_country_source)}</td>
                         <td className="centered"><span className={`status-pill status-pill--${result.status}`}>{statusLabelMap[result.status] ?? result.status}</span></td>
                       </tr>
                     ))}
@@ -722,34 +705,40 @@ export default function App() {
                       <div className="metric-grid">
                         <div className="metric-card"><span>粉丝数</span><strong>{formatCompactNumber(selectedResult.subscribers)}</strong></div>
                         <div className="metric-card"><span>播放量</span><strong>{formatCompactNumber(selectedResult.views)}</strong></div>
-                        <div className="metric-card"><span>点赞数</span><strong>{formatCompactNumber(selectedResult.likes)}</strong></div>
-                        <div className="metric-card"><span>评论数</span><strong>{formatCompactNumber(selectedResult.comments)}</strong></div>
+                        <div className="metric-card"><span>国家</span><strong>{selectedResult.channel_country || "无"}</strong></div>
+                        <div className="metric-card"><span>视频语言</span><strong>{selectedResult.video_language || "无"}</strong></div>
                       </div>
                     </section>
 
                     <section className="detail-section">
-                      <h4>表现指标</h4>
+                      <h4>菲律宾证据</h4>
                       <div className="detail-list">
-                        <div className="detail-list__item"><span>互动率<MetricHelp metric="engagement_rate" /></span><strong className="metric-positive">{formatPercent(selectedResult.engagement_rate)}</strong></div>
-                        <div className="detail-list__item"><span>评论率<MetricHelp metric="comment_rate" /></span><strong>{formatPercent(selectedResult.comment_rate)}</strong></div>
-                        <div className="detail-list__item"><span>播粉比<MetricHelp metric="view_sub_ratio" /></span><strong className="metric-positive">{formatPercent(selectedResult.view_sub_ratio)}</strong></div>
-                        <div className="detail-list__item"><span>相对传播速度<MetricHelp metric="relative_velocity" /></span><strong>{selectedResult.relative_velocity?.toFixed(3) ?? "-"}</strong></div>
-                      </div>
-                    </section>
-
-                    <section className="detail-section">
-                      <h4>状态信息</h4>
-                      <div className="detail-list">
+                        <div className="detail-list__item"><span>国家来源</span><strong>{formatCountrySource(selectedResult.channel_country_source)}</strong></div>
+                        <div className="detail-list__item"><span>频道状态</span><strong>{statusLabelMap[selectedResult.status] ?? selectedResult.status}</strong></div>
                         <div className="detail-list__item"><span>发布时间</span><strong>{selectedResult.published_at ?? "-"}</strong></div>
                         <div className="detail-list__item"><span>发布天数</span><strong>{selectedResult.days_since_publish ?? "-"}</strong></div>
-                        <div className="detail-list__item"><span>Pre Score<MetricHelp metric="pre_score" placement="top" /></span><strong>{selectedResult.pre_score?.toFixed(2) ?? "-"}</strong></div>
-                        <div className="detail-list__item"><span>机会层级<MetricHelp metric="opportunity_tier" /></span><strong>{selectedResult.opportunity_tier ?? "-"}</strong></div>
-                        <div className="detail-list__item"><span>国家</span><strong>{selectedResult.channel_country || "无"}</strong></div>
-                        <div className="detail-list__item"><span>国家来源</span><strong>{formatCountrySource(selectedResult.channel_country_source)}</strong></div>
-                        <div className="detail-list__item"><span>视频语言</span><strong>{selectedResult.video_language || "无"}</strong></div>
-                        <div className="detail-list__item"><span>状态</span><strong>{statusLabelMap[selectedResult.status] ?? selectedResult.status}</strong></div>
                       </div>
                     </section>
+
+                    <section className="detail-section">
+                      <h4>辅助信息</h4>
+                      <div className="detail-list">
+                        <div className="detail-list__item"><span>点赞数</span><strong>{formatCompactNumber(selectedResult.likes)}</strong></div>
+                        <div className="detail-list__item"><span>评论数</span><strong>{formatCompactNumber(selectedResult.comments)}</strong></div>
+                        <div className="detail-list__item"><span>搜索顺位</span><strong>{selectedResult.raw_search_rank ?? "-"}</strong></div>
+                        <div className="detail-list__item"><span>频道链接</span><strong>{selectedResult.channel_id ? `youtube.com/channel/${selectedResult.channel_id}` : "-"}</strong></div>
+                      </div>
+                    </section>
+
+                    {selectedResult.video_description ? (
+                      <section className="detail-section">
+                        <h4>视频描述摘要</h4>
+                        <p style={{ color: "rgba(225,230,255,0.82)", lineHeight: 1.7, margin: 0 }}>
+                          {selectedResult.video_description.slice(0, 500)}
+                          {selectedResult.video_description.length > 500 ? "..." : ""}
+                        </p>
+                      </section>
+                    ) : null}
                   </div>
                 </>
               ) : (

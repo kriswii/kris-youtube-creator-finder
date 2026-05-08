@@ -59,4 +59,14 @@ export function initializeDatabase(db: SqliteDatabase): void {
   } catch {
     // Ignore when the column already exists.
   }
+  try {
+    db.exec("ALTER TABLE results ADD COLUMN video_description TEXT;");
+  } catch {
+    // Ignore when the column already exists.
+  }
+  try {
+    db.exec("ALTER TABLE results ADD COLUMN video_tags_json TEXT;");
+  } catch {
+    // Ignore when the column already exists.
+  }
 }

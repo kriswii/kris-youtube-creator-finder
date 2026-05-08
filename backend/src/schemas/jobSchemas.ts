@@ -4,6 +4,18 @@ import { jobStages, jobStatuses } from "../types/job.js";
 export const jobStatusSchema = z.enum(jobStatuses);
 export const jobStageSchema = z.enum(jobStages);
 
+function normalizeCountryInput(value: string | undefined): string | undefined {
+  const normalized = (value ?? "").trim();
+  if (!normalized) return undefined;
+
+  const upper = normalized.toUpperCase();
+  if (["PH", "PHILIPPINES", "FILIPINO", "PINOY", "菲律宾", "菲律賓"].includes(upper) || ["菲律宾", "菲律賓"].includes(normalized)) {
+    return "PH";
+  }
+
+  return upper.length === 2 ? upper : undefined;
+}
+
 export const createJobSchema = z.object({
   keyword: z.string().trim().min(1),
   lookback_days: z.number().int().positive().default(30),
@@ -12,7 +24,7 @@ export const createJobSchema = z.object({
   max_candidates: z.number().int().positive().default(200),
   shortlist_size: z.number().int().positive().default(50),
   minimum_pre_score: z.number().min(0).max(100).default(55),
-  channel_country: z.string().trim().toUpperCase().length(2).optional()
+  channel_country: z.string().optional().transform(normalizeCountryInput)
 });
 
 export const jobRecordSchema = createJobSchema.extend({
