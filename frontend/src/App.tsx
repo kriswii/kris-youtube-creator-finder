@@ -8,7 +8,7 @@ const defaultForm: CreateJobInput = {
   subscriber_min: 100,
   subscriber_max: 5000000,
   max_candidates: 500,
-  shortlist_size: 50,
+  shortlist_size: 100,
   minimum_pre_score: 0,
   channel_country: ""
 };
@@ -106,8 +106,22 @@ function normalizeCountryCode(value: string | null | undefined): string {
   const normalized = (value ?? "").trim();
   if (!normalized) return "";
   const upper = normalized.toUpperCase();
-  if (["PH", "PHILIPPINES", "FILIPINO", "PINOY"].includes(upper) || ["菲律宾", "菲律賓"].includes(normalized)) {
-    return "PH";
+  const aliases: Record<string, string[]> = {
+    PH: ["PH", "PHILIPPINES", "FILIPINO", "PINOY", "菲律宾", "菲律賓"],
+    ID: ["ID", "INDONESIA", "INDONESIAN", "INDO"],
+    TH: ["TH", "THAILAND", "THAI"],
+    BR: ["BR", "BRAZIL", "BRASIL", "BRAZILIAN"],
+    SG: ["SG", "SINGAPORE", "SINGAPOREAN"],
+    MY: ["MY", "MALAYSIA", "MALAYSIAN"],
+    VN: ["VN", "VIETNAM", "VIETNAMESE"],
+    KR: ["KR", "KOREA", "SOUTH KOREA", "KOREAN"],
+    JP: ["JP", "JAPAN", "JAPANESE"],
+    TW: ["TW", "TAIWAN", "TAIWANESE"],
+    US: ["US", "UNITED STATES", "USA", "AMERICA", "AMERICAN"]
+  };
+
+  for (const [code, values] of Object.entries(aliases)) {
+    if (values.includes(upper) || values.includes(normalized)) return code;
   }
   return upper;
 }
@@ -115,8 +129,7 @@ function normalizeCountryCode(value: string | null | undefined): string {
 function allowsCountryDisplay(selectedCountry: string, resultCountryRaw: string | null | undefined): boolean {
   const resultCountry = normalizeCountryCode(resultCountryRaw);
   if (!selectedCountry) return true;
-  if (selectedCountry === "PH") return resultCountry === "PH" || !resultCountry;
-  return resultCountry === selectedCountry;
+  return resultCountry === selectedCountry || !resultCountry;
 }
 
 function compareValues(
@@ -555,7 +568,7 @@ export default function App() {
                   </label>
                   <label>
                     <span>入围数量</span>
-                    <input type="number" value={50} readOnly />
+                    <input type="number" value={100} readOnly />
                   </label>
                   <label>
                     <span>最小粉丝数</span>
@@ -609,7 +622,7 @@ export default function App() {
               <div className="workspace-panel__header">
                 <div>
                   <h2>候选结果</h2>
-                  <p>结果会先经过视频描述 / tags 的关键词校验，再按菲律宾证据、播放量和粉丝数排序。</p>
+                  <p>结果会先经过视频描述 / tags 的关键词校验，再按国家证据、播放量和粉丝数排序。</p>
                 </div>
               </div>
 
@@ -711,7 +724,7 @@ export default function App() {
                     </section>
 
                     <section className="detail-section">
-                      <h4>菲律宾证据</h4>
+                      <h4>国家证据</h4>
                       <div className="detail-list">
                         <div className="detail-list__item"><span>国家来源</span><strong>{formatCountrySource(selectedResult.channel_country_source)}</strong></div>
                         <div className="detail-list__item"><span>频道状态</span><strong>{statusLabelMap[selectedResult.status] ?? selectedResult.status}</strong></div>

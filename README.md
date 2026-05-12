@@ -1,43 +1,58 @@
 # YouTube Creator Finder
 
-A local-first YouTube creator discovery tool for finding small and mid-sized channels whose recent videos overperform their subscriber base.
+A local-first YouTube creator discovery tool for finding game-related YouTube channels by keyword and country/region.
 
-The project is designed for partnership and outreach research. It favors relative performance signals such as view/subscriber ratio, engagement rate, comment rate, and relative velocity instead of ranking creators by absolute views alone.
+This fork has been iterated for practical KOL sourcing rather than generic creator scoring. The current product goal is:
+
+- search game-related creators by keyword;
+- support region-specific discovery such as PH / TH / VN / ID;
+- keep weak-but-useful country evidence instead of over-filtering;
+- dedupe to one row per channel;
+- export clean Excel files that outreach teammates can use directly.
 
 ## What It Does
 
-- Searches recent YouTube videos by keyword through the YouTube Data API.
-- Enriches videos with views, likes, comments, channel title, subscribers, channel country, and channel avatar.
-- Computes deterministic `pre_score` using fixed formulas documented in `AGENTS.md`.
-- Filters and shortlists promising creators in the default 3k-50k subscriber range.
-- Shows a polished Chinese dashboard with sortable results, filters, metric explanations, and detail panel.
-- Exports shortlisted results to XLSX.
-- Can be deployed as a fixed Cloudflare Pages frontend that proxies to a local backend through Cloudflare Tunnel.
+- Searches recent YouTube videos by keyword and resolves them to channel-level results.
+- Validates keyword hits from:
+  - title
+  - video description
+  - description hashtags
+  - video tags
+- Enriches channels with subscribers, views, country, language, avatar, and description.
+- Uses layered country evidence:
+  - channel "About / more info"
+  - YouTube API country
+  - metadata/text weak evidence
+  - language as enhancement only
+- Dedupe results by channel so one channel only appears once.
+- When a country is selected, the UI only shows that country and blank-country rows.
+- Exports deduped `.xlsx` files with one row per channel and country-aware filtering.
+- Includes local keep-alive scripts for frontend, backend, and the dedicated search browser session.
 
-## Current Stable Pipeline
+## Current Runtime Pipeline
 
 ```text
 keyword
-  -> YouTube search.list
-  -> videos.list metrics
-  -> channels.list metrics
-  -> deterministic pre_score
-  -> shortlist
-  -> dashboard
+  -> YouTube web search / local search browser
+  -> keyword-hit validation (title / description / hashtags / tags)
+  -> channel-level dedupe
+  -> channel enrichment
+  -> country evidence evaluation
+  -> UI display filtering
   -> XLSX export
 ```
 
-Contact scraping, Comet automation, and MiniMax analysis are not part of the current stable UI flow.
+YouTube Data API is still used as an enrichment/data source, but the product is no longer documented as a pure API-first finder.
 
 ## Repository Structure
 
 ```text
-backend/              Node.js + TypeScript backend, SQLite persistence, scoring, export
-frontend/             React + TypeScript dashboard and Cloudflare Pages Functions
+backend/              Node.js + TypeScript backend, SQLite persistence, export, country logic
+frontend/             React + TypeScript dashboard
 cloudflare/           Cloudflare deployment notes and optional Worker proxy template
-scripts/              Local startup and tunnel automation scripts
+scripts/              Local startup, watchdog, and helper scripts
 docs/                 Architecture and product notes
-AGENTS.md             Product rules and mandatory scoring formulas
+AGENTS.md             Product rules and historical design notes
 .env.example          Environment variable template
 ```
 
@@ -55,10 +70,10 @@ Copy `.env.example` to `.env` in the project root or configure equivalent enviro
 ```text
 YOUTUBE_API_KEY=
 APP_BASE_URL=http://localhost:3000
-DEFAULT_SUB_MIN=3000
-DEFAULT_SUB_MAX=50000
-DEFAULT_MAX_CANDIDATES=200
-DEFAULT_LOOKBACK_DAYS=30
+DEFAULT_SUB_MIN=100
+DEFAULT_SUB_MAX=5000000
+DEFAULT_MAX_CANDIDATES=500
+DEFAULT_LOOKBACK_DAYS=14
 EXPORT_DIR=./data/exports
 ```
 
@@ -67,7 +82,7 @@ Do not commit `.env`, `.env.local`, SQLite databases, or export files.
 ## Local Backend
 
 ```powershell
-cd "C:\Users\ug1ra\Documents\New project\backend"
+cd "<repo>\backend"
 npm install
 npm run db:init
 npm run typecheck
@@ -78,51 +93,57 @@ npm run dev
 Default backend health check:
 
 ```text
-http://localhost:3011/health
+http://localhost:3001/health
 ```
 
 ## Local Frontend
 
 ```powershell
-cd "C:\Users\ug1ra\Documents\New project\frontend"
+cd "<repo>\frontend"
 npm install
 npm run typecheck
 npm run build
 npm run dev
 ```
 
-Open the Vite `Local:` URL shown in the terminal.
-
 For local development, `frontend/.env.local` can point to:
 
 ```env
-VITE_API_BASE_URL=http://localhost:3011
+VITE_API_BASE_URL=http://localhost:3001
 ```
 
-## One-Click Local Startup
+## Local Startup Helpers
 
-Windows helper:
-
-```text
-C:\Users\ug1ra\Desktop\启动YouTube潜力股挖掘.bat
-```
-
-Repository script:
+Start the fixed local stack:
 
 ```powershell
-cd "C:\Users\ug1ra\Documents\New project"
+cd "<repo>"
 .\scripts\start-local-with-tunnel.ps1
 ```
 
-The script starts the backend, starts a Cloudflare quick Tunnel, captures the generated `trycloudflare.com` URL, writes it to `frontend/.env.local`, and starts the frontend.
-
-If the Cloudflare Pages project exists:
+Optional keep-alive watcher:
 
 ```powershell
-.\scripts\start-local-with-tunnel.ps1 -UpdatePagesSecret -PagesProjectName youtube-finder
+.\scripts\keep-local-services-alive.ps1
 ```
 
-This updates the Pages `BACKEND_BASE_URL` secret so the fixed public frontend can keep proxying to the newest local Tunnel URL.
+This watcher monitors:
+
+- frontend preview
+- backend API
+- dedicated YouTube search browser session
+
+and restarts them when they drop.
+
+## Dedicated Search Browser
+
+For the local web-search flow, keep the dedicated search browser running:
+
+```powershell
+.\scripts\start-youtube-search-browser.ps1
+```
+
+The dedicated browser is used for the more human-like local YouTube search path.
 
 ## Cloudflare Pages Deployment
 
@@ -132,7 +153,7 @@ Recommended no-domain setup:
 Cloudflare Pages fixed frontend
   -> Pages Function /api/* proxy
   -> current quick Tunnel URL
-  -> local backend on http://localhost:3011
+  -> local backend on http://localhost:3001
 ```
 
 Pages settings:
@@ -150,32 +171,49 @@ See `cloudflare/README.md` for deployment details.
 ## API Flow
 
 ```powershell
-$job = Invoke-RestMethod "http://localhost:3011/api/jobs" -Method Post -ContentType "application/json" -Body '{"keyword":"iphone accessories","lookback_days":30,"subscriber_min":3000,"subscriber_max":50000,"max_candidates":20,"shortlist_size":10,"minimum_pre_score":55}'
-Invoke-RestMethod "http://localhost:3011/api/jobs/$($job.job.id)/run-search" -Method Post
-Invoke-RestMethod "http://localhost:3011/api/jobs/$($job.job.id)/run-enrichment" -Method Post
-Invoke-RestMethod "http://localhost:3011/api/jobs/$($job.job.id)/run-pre-score" -Method Post
-Invoke-RestMethod "http://localhost:3011/api/jobs/$($job.job.id)/run-shortlist" -Method Post
-Invoke-RestMethod "http://localhost:3011/api/jobs/$($job.job.id)"
+$job = Invoke-RestMethod "http://localhost:3001/api/jobs" -Method Post -ContentType "application/json" -Body '{"keyword":"lordnine","channel_country":"PH"}'
+Invoke-RestMethod "http://localhost:3001/api/jobs/$($job.job.id)/run-search" -Method Post
+Invoke-RestMethod "http://localhost:3001/api/jobs/$($job.job.id)/run-enrichment" -Method Post
+Invoke-RestMethod "http://localhost:3001/api/jobs/$($job.job.id)/run-pre-score" -Method Post
+Invoke-RestMethod "http://localhost:3001/api/jobs/$($job.job.id)/run-shortlist" -Method Post
+Invoke-RestMethod "http://localhost:3001/api/jobs/$($job.job.id)"
 ```
 
-## Shortlist Defaults
+## Current Defaults
 
-- Subscribers between `subscriber_min` and `subscriber_max`, default 3,000-50,000.
-- Published within `lookback_days`, default 30 days.
-- Views at least 3,000.
-- `pre_score >= minimum_pre_score`, default 55.
-- Sorted by `pre_score DESC`.
-- Limited to `shortlist_size`.
+- `lookback_days`: `14`
+- `subscriber_min`: `100`
+- `subscriber_max`: `5,000,000`
+- `max_candidates`: default UI value `500` and user-adjustable
+- `shortlist_size`: fixed to `100` in the current runtime flow
+- `minimum_pre_score`: default UI value `0`
 
-## Scoring
+Important:
 
-Scoring formulas are mandatory product rules and live in `AGENTS.md`.
+- when a country is selected, UI results only show that country or blank-country rows;
+- exports are deduped by channel;
+- exports follow the current country selection logic.
 
-Important principles:
+## Export Rules
 
-- Do not let absolute views dominate ranking.
-- Prefer creators whose videos overperform relative to their subscriber count.
-- Keep formula changes covered by tests.
+- one row per channel
+- channel link preferred over duplicated video links
+- if no country is selected, export all deduped results
+- if a country is selected, export only that country's results
+- output format is standard `.xlsx`
+
+## Notes On Country Logic
+
+The current implementation was originally tuned for Philippines discovery, then generalized so the same logic can be reused for TH / VN / ID / MY / SG / BR / KR / JP / TW / US without weakening PH behavior.
+
+Country evidence remains layered:
+
+- strongest: channel "About / more info"
+- second: YouTube API country
+- weak: metadata/text evidence
+- language: enhancement only
+
+When country evidence is weak, blank-country rows may still be shown because the workflow is designed to reduce false negatives, not aggressively hide useful candidates.
 
 ## Tests
 

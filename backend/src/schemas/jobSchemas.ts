@@ -4,13 +4,27 @@ import { jobStages, jobStatuses } from "../types/job.js";
 export const jobStatusSchema = z.enum(jobStatuses);
 export const jobStageSchema = z.enum(jobStages);
 
+const COUNTRY_ALIASES: Record<string, string[]> = {
+  PH: ["PH", "PHILIPPINES", "FILIPINO", "PINOY", "菲律宾", "菲律賓"],
+  ID: ["ID", "INDONESIA", "INDONESIAN", "INDO"],
+  TH: ["TH", "THAILAND", "THAI"],
+  BR: ["BR", "BRAZIL", "BRASIL", "BRAZILIAN"],
+  SG: ["SG", "SINGAPORE", "SINGAPOREAN"],
+  MY: ["MY", "MALAYSIA", "MALAYSIAN"],
+  VN: ["VN", "VIETNAM", "VIETNAMESE"],
+  KR: ["KR", "KOREA", "SOUTH KOREA", "KOREAN"],
+  JP: ["JP", "JAPAN", "JAPANESE"],
+  TW: ["TW", "TAIWAN", "TAIWANESE"],
+  US: ["US", "UNITED STATES", "USA", "AMERICA", "AMERICAN"]
+};
+
 function normalizeCountryInput(value: string | undefined): string | undefined {
   const normalized = (value ?? "").trim();
   if (!normalized) return undefined;
 
   const upper = normalized.toUpperCase();
-  if (["PH", "PHILIPPINES", "FILIPINO", "PINOY", "菲律宾", "菲律賓"].includes(upper) || ["菲律宾", "菲律賓"].includes(normalized)) {
-    return "PH";
+  for (const [code, aliases] of Object.entries(COUNTRY_ALIASES)) {
+    if (aliases.includes(upper) || aliases.includes(normalized)) return code;
   }
 
   return upper.length === 2 ? upper : undefined;
@@ -18,12 +32,12 @@ function normalizeCountryInput(value: string | undefined): string | undefined {
 
 export const createJobSchema = z.object({
   keyword: z.string().trim().min(1),
-  lookback_days: z.number().int().positive().default(30),
-  subscriber_min: z.number().int().nonnegative().default(3000),
-  subscriber_max: z.number().int().nonnegative().default(50000),
-  max_candidates: z.number().int().positive().default(200),
-  shortlist_size: z.number().int().positive().default(50),
-  minimum_pre_score: z.number().min(0).max(100).default(55),
+  lookback_days: z.number().int().positive().default(14),
+  subscriber_min: z.number().int().nonnegative().default(100),
+  subscriber_max: z.number().int().nonnegative().default(5000000),
+  max_candidates: z.number().int().positive().default(500),
+  shortlist_size: z.number().int().positive().default(100),
+  minimum_pre_score: z.number().min(0).max(100).default(0),
   channel_country: z.string().optional().transform(normalizeCountryInput)
 });
 

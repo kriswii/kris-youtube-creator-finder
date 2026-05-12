@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+﻿import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { env } from "../config/env.js";
@@ -24,7 +24,7 @@ import { createExportFile } from "../services/export/exportService.js";
 import { scrapePublicChannelContact } from "../services/playwright/contactScrapeService.js";
 import { searchCandidatesViaYouTubeWeb } from "../services/playwright/youtubeWebSearchService.js";
 
-const FIXED_SHORTLIST_SIZE = 50;
+const FIXED_SHORTLIST_SIZE = 100;
 const FIXED_LOOKBACK_DAYS = 14;
 const FIXED_SUBSCRIBER_MAX = 5000000;
 
@@ -227,10 +227,6 @@ function applyChannelMetric(db: SqliteDatabase, jobId: string, metric: YouTubeCh
   );
 }
 
-const PHILIPPINES_EVIDENCE_PATTERN = /\b(pinoy|filipino|philippines|philippine|tagalog)\b|菲律宾|菲律賓/i;
-
-const PHILIPPINES_LANGUAGE_PATTERN = /^(tl|fil)(-|$)|^(en)(-|$)/i;
-
 const COUNTRY_SOURCE_PRIORITY: Record<string, number> = {
   youtube_about_popup: 4,
   youtube_api: 3,
@@ -239,8 +235,61 @@ const COUNTRY_SOURCE_PRIORITY: Record<string, number> = {
   unknown: 0
 };
 
+const COUNTRY_EVIDENCE_CONFIG: Record<
+  string,
+  {
+    aliases: string[];
+    languagePattern?: RegExp;
+    allowEnglishHint?: boolean;
+  }
+> = {
+  PH: {
+    aliases: ["philippines", "philippine", "filipino", "pinoy", "tagalog"],
+    languagePattern: /^(tl|fil)(-|$)|^(en)(-|$)/i,
+    allowEnglishHint: true
+  },
+  ID: {
+    aliases: ["indonesia", "indonesian", "indo", "bahasa indonesia"],
+    languagePattern: /^(id)(-|$)/i
+  },
+  TH: {
+    aliases: ["thailand", "thai"],
+    languagePattern: /^(th)(-|$)/i
+  },
+  BR: {
+    aliases: ["brazil", "brasil", "brazilian", "portuguese brazil"],
+    languagePattern: /^(pt-br|pt)(-|$)/i
+  },
+  SG: {
+    aliases: ["singapore", "singaporean"]
+  },
+  MY: {
+    aliases: ["malaysia", "malaysian", "bahasa melayu"],
+    languagePattern: /^(ms)(-|$)/i
+  },
+  VN: {
+    aliases: ["vietnam", "vietnamese"],
+    languagePattern: /^(vi)(-|$)/i
+  },
+  KR: {
+    aliases: ["korea", "south korea", "korean"],
+    languagePattern: /^(ko)(-|$)/i
+  },
+  JP: {
+    aliases: ["japan", "japanese"],
+    languagePattern: /^(ja)(-|$)/i
+  },
+  TW: {
+    aliases: ["taiwan", "taiwanese"],
+    languagePattern: /^(zh-tw)(-|$)|^(zh-hant)(-|$)/i
+  },
+  US: {
+    aliases: ["united states", "usa", "u.s.", "america", "american"]
+  }
+};
+
 function hasPhilippinesMetadataEvidence(row: CreatorResult): boolean {
-  return PHILIPPINES_EVIDENCE_PATTERN.test([row.channel_title, row.channel_description, row.title].filter(Boolean).join(" "));
+  return hasCountryMetadataEvidence(row, "PH");
 }
 
 function hasConflictingCountry(row: CreatorResult, targetCountry: string): boolean {
@@ -249,7 +298,29 @@ function hasConflictingCountry(row: CreatorResult, targetCountry: string): boole
 }
 
 function hasPhilippinesLanguageEvidence(row: CreatorResult): boolean {
-  return PHILIPPINES_LANGUAGE_PATTERN.test(row.video_language ?? "");
+  return hasCountryLanguageEvidence(row, "PH");
+}
+
+function hasCountryMetadataEvidence(row: CreatorResult, targetCountry: string): boolean {
+  const config = COUNTRY_EVIDENCE_CONFIG[targetCountry];
+  if (!config) return false;
+
+  const haystack = [row.channel_title, row.channel_description, row.title]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return config.aliases.some((alias) => haystack.includes(alias.toLowerCase()));
+}
+
+function hasCountryLanguageEvidence(row: CreatorResult, targetCountry: string): boolean {
+  const config = COUNTRY_EVIDENCE_CONFIG[targetCountry];
+  if (!config) return false;
+
+  const language = row.video_language ?? "";
+  if (config.languagePattern?.test(language)) return true;
+  if (!config.allowEnglishHint) return false;
+  return /^(en)(-|$)/i.test(language) && !hasConflictingCountry(row, targetCountry);
 }
 
 function normalizeKeyword(value: string): string {
@@ -282,11 +353,15 @@ function hasKeywordInSearchSignals(row: CreatorResult, keyword: string): boolean
 }
 
 function getPhilippinesMatchLevel(row: CreatorResult): "exact" | "weak" | "none" {
+  return getCountryMatchLevel(row, "PH");
+}
+
+function getCountryMatchLevel(row: CreatorResult, targetCountry: string): "exact" | "weak" | "none" {
   const country = row.channel_country?.trim().toUpperCase();
-  if (country === "PH") return "exact";
-  if (country && country !== "PH") return "none";
-  if (hasPhilippinesMetadataEvidence(row)) return "weak";
-  if (hasPhilippinesLanguageEvidence(row) && !hasConflictingCountry(row, "PH")) return "weak";
+  if (country === targetCountry) return "exact";
+  if (country && country !== targetCountry) return "none";
+  if (hasCountryMetadataEvidence(row, targetCountry)) return "weak";
+  if (hasCountryLanguageEvidence(row, targetCountry)) return "weak";
   return "none";
 }
 
@@ -297,9 +372,8 @@ function countrySourcePriority(source: string | null | undefined): number {
 function estimateChannelPriority(row: CreatorResult, targetCountry: string): number {
   const sourceScore = countrySourcePriority(row.channel_country_source) * 10000;
   const exactCountryBonus = row.channel_country?.trim().toUpperCase() === targetCountry ? 5000 : 0;
-  const metadataBonus = targetCountry === "PH" && hasPhilippinesMetadataEvidence(row) ? 2500 : 0;
-  const languageBonus =
-    targetCountry === "PH" && hasPhilippinesLanguageEvidence(row) && !hasConflictingCountry(row, targetCountry) ? 1200 : 0;
+  const metadataBonus = hasCountryMetadataEvidence(row, targetCountry) ? 2500 : 0;
+  const languageBonus = hasCountryLanguageEvidence(row, targetCountry) ? 1200 : 0;
   const viewScore = Math.min(row.views ?? 0, 1_000_000);
   const subscriberScore = Math.min(row.subscribers ?? 0, 1_000_000) / 10;
   const searchRankBonus = row.raw_search_rank ? Math.max(0, 200 - row.raw_search_rank) : 0;
@@ -386,12 +460,12 @@ async function strengthenCountrySignals(
       }
     }
 
-    if (targetCountry === "PH" && !resolvedCountry && !hasConflictingCountry(row, targetCountry)) {
-      if (hasPhilippinesMetadataEvidence(row)) {
-        resolvedCountry = "PH";
+    if (!resolvedCountry && !hasConflictingCountry(row, targetCountry)) {
+      if (hasCountryMetadataEvidence(row, targetCountry)) {
+        resolvedCountry = targetCountry;
         resolvedSource = resolvedSource ?? "metadata_keyword";
-      } else if (hasPhilippinesLanguageEvidence(row)) {
-        resolvedCountry = "PH";
+      } else if (hasCountryLanguageEvidence(row, targetCountry)) {
+        resolvedCountry = targetCountry;
         resolvedSource = resolvedSource ?? "language_hint";
       }
     }
@@ -592,8 +666,7 @@ async function runShortlist(db: SqliteDatabase, job: JobRecord): Promise<{ short
     .filter((row) => {
       if (!hasKeywordInSearchSignals(row, job.keyword)) return false;
       if (!hasCountryFilter) return true;
-      if (countryCode !== "PH") return row.channel_country?.trim().toUpperCase() === countryCode;
-      return getPhilippinesMatchLevel(row) !== "none";
+      return getCountryMatchLevel(row, countryCode) !== "none";
     })
     .sort((left, right) => {
       const sourceDiff = countrySourcePriority(right.channel_country_source) - countrySourcePriority(left.channel_country_source);
@@ -627,10 +700,14 @@ async function runShortlist(db: SqliteDatabase, job: JobRecord): Promise<{ short
 function normalizeCountryCode(value: string | null | undefined): string {
   const normalized = (value ?? "").trim();
   if (!normalized) return "";
+
   const upper = normalized.toUpperCase();
-  if (["PH", "PHILIPPINES", "FILIPINO", "PINOY"].includes(upper) || ["菲律宾", "菲律賓"].includes(normalized)) {
-    return "PH";
+  for (const [code, config] of Object.entries(COUNTRY_EVIDENCE_CONFIG)) {
+    if (config.aliases.some((alias) => alias.toUpperCase() === upper || alias === normalized)) {
+      return code;
+    }
   }
+
   return upper;
 }
 
@@ -642,8 +719,7 @@ function buildChannelDedupKey(row: CreatorResult): string {
 
 function isCountryMatchForExport(row: CreatorResult, selectedCountry: string): boolean {
   if (!selectedCountry) return true;
-  if (selectedCountry === "PH") return getPhilippinesMatchLevel(row) !== "none";
-  return normalizeCountryCode(row.channel_country) === selectedCountry;
+  return getCountryMatchLevel(row, selectedCountry) !== "none";
 }
 
 function scoreExportRow(row: CreatorResult, selectedCountry: string): number {
@@ -651,14 +727,10 @@ function scoreExportRow(row: CreatorResult, selectedCountry: string): number {
   const countryScore =
     !selectedCountry
       ? 0
-      : selectedCountry === "PH"
-        ? getPhilippinesMatchLevel(row) === "exact"
-          ? 500_000
-          : getPhilippinesMatchLevel(row) === "weak"
-            ? 250_000
-            : 0
-        : normalizeCountryCode(row.channel_country) === selectedCountry
-          ? 500_000
+      : getCountryMatchLevel(row, selectedCountry) === "exact"
+        ? 500_000
+        : getCountryMatchLevel(row, selectedCountry) === "weak"
+          ? 250_000
           : 0;
   const viewScore = Math.min(row.views ?? 0, 10_000_000);
   const subscriberScore = Math.min(row.subscribers ?? 0, 10_000_000) / 10;
@@ -874,3 +946,4 @@ export async function handleJobsRoute(
 
   return { handled: false };
 }
+

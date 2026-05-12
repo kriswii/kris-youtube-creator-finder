@@ -3,12 +3,12 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   keyword TEXT NOT NULL,
-  lookback_days INTEGER NOT NULL DEFAULT 30,
-  subscriber_min INTEGER NOT NULL DEFAULT 3000,
-  subscriber_max INTEGER NOT NULL DEFAULT 50000,
-  max_candidates INTEGER NOT NULL DEFAULT 200,
-  shortlist_size INTEGER NOT NULL DEFAULT 50,
-  minimum_pre_score REAL NOT NULL DEFAULT 55,
+  lookback_days INTEGER NOT NULL DEFAULT 14,
+  subscriber_min INTEGER NOT NULL DEFAULT 100,
+  subscriber_max INTEGER NOT NULL DEFAULT 5000000,
+  max_candidates INTEGER NOT NULL DEFAULT 500,
+  shortlist_size INTEGER NOT NULL DEFAULT 100,
+  minimum_pre_score REAL NOT NULL DEFAULT 0,
   channel_country TEXT,
   status TEXT NOT NULL CHECK (status IN ('draft', 'running', 'completed', 'failed', 'cancelled')),
   stage TEXT NOT NULL CHECK (
